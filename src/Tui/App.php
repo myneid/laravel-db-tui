@@ -1,0 +1,579 @@
+<?php
+
+namespace Myneid\LaravelDbTui\Tui;
+
+use Myneid\LaravelDbTui\Database\PdoConnection;
+
+/**
+ * Holds all application state and handles input events.
+ * The renderer reads this state to build the UI each frame.
+ */
+class App
+{
+    // ── Mode ──────────────────────────────────────────────────────────────
+    public Mode $mode = Mode::Tables;
+
+    // ── Table list (left panel) ───────────────────────────────────────────
+    /** @var string[] */
+    public array $tables     = [];
+    public int   $tableIndex = 0;  // selected row in the table list
+
+    // ── Data table (right panel) ──────────────────────────────────────────
+    /** @var string[] */
+    public array $columns = [];
+    /** @var array<int, array<string, mixed>> */
+    public array $rows      = [];
+    public int   $rowIndex  = 0;   // selected row within the current page
+    public int   $totalRows = 0;
+    public int   $dataPage  = 0;
+    public int   $limit     = 200;
+
+    public ?int  $sortColumn = null;
+    public string $sortDir   = 'ASC';
+
+    // ── SQL editor ────────────────────────────────────────────────────────
+    public string  $sqlInput    = '';
+    /** @var string[] */
+    public array   $sqlColumns  = [];
+    /** @var array<int, array<string, mixed>> */
+    public array   $sqlRows     = [];
+    public ?string $sqlError    = null;
+    public int     $sqlRowIndex = 0;  // selected row in the results table
+
+    // ── Row editing ───────────────────────────────────────────────────────
+    public int     $editFieldIndex = 0;    // focused field in the detail view
+    public bool    $isEditing      = false; // actively typing a new value
+    public string  $editBuffer     = '';
+    /** @var array<string, string|null> */
+    public array   $dirtyValues    = [];    // unsaved edits: col => new value
+    public ?string $saveMessage    = null;  // feedback after save attempt
+
+    // ── General ───────────────────────────────────────────────────────────
+    public ?string $statusMessage = null;
+    public bool    $running       = true;
+
+    public function __construct(private readonly PdoConnection $db)
+    {
+    }
+
+    // ── Init ──────────────────────────────────────────────────────────────
+
+    public function init(): void
+    {
+        $this->tables = $this->db->getTables();
+        if (!empty($this->tables)) {
+            $this->loadTableData($this->tables[0]);
+        }
+    }
+
+    // ── Accessors ─────────────────────────────────────────────────────────
+
+    public function selectedTable(): string
+    {
+        return $this->tables[$this->tableIndex] ?? '';
+    }
+
+    /** @return array<string, mixed> */
+    public function currentRow(): array
+    {
+        return $this->rows[$this->rowIndex] ?? [];
+    }
+
+    public function pageOffset(): int
+    {
+        return $this->dataPage * $this->limit;
+    }
+
+    // ── Event handling ────────────────────────────────────────────────────
+
+    public function handleCodedKey(string $code): void
+    {
+        match ($this->mode) {
+            Mode::Tables  => $this->tablesCodedKey($code),
+            Mode::Data    => $this->dataCodedKey($code),
+            Mode::Row     => $this->rowCodedKey($code),
+            Mode::Sql     => $this->sqlCodedKey($code),
+            Mode::SqlRow  => $this->sqlRowCodedKey($code),
+        };
+    }
+
+    public function handleCharKey(string $char, bool $ctrl = false): void
+    {
+        if ($ctrl && $char === 'c') {
+            $this->running = false;
+            return;
+        }
+
+        match ($this->mode) {
+            Mode::Tables  => $this->tablesCharKey($char),
+            Mode::Data    => $this->dataCharKey($char),
+            Mode::Row     => $this->rowCharKey($char),
+            Mode::Sql     => $this->sqlCharKey($char),
+            Mode::SqlRow  => $this->sqlRowCharKey($char),
+        };
+    }
+
+    /**
+     * @param string $kind  One of: ScrollUp, ScrollDown, Down, Up (MouseEventKind names)
+     * @param int    $x     Column of click
+     * @param int    $y     Row of click
+     * @param int    $termW Terminal width (used to decide left/right panel)
+     */
+    public function handleMouse(string $kind, int $x, int $y, int $termW): void
+    {
+        $leftPanelWidth = 32; // matches the Renderer's Constraint::length(32)
+
+        switch ($kind) {
+            case 'ScrollUp':
+                match ($this->mode) {
+                    Mode::Tables => $this->tableUp(),
+                    Mode::Data   => $this->rowUp(),
+                    Mode::Row    => $this->rowUp(),
+                    Mode::Sql    => $this->sqlResultUp(),
+                    Mode::SqlRow => $this->sqlResultUp(),
+                };
+                break;
+
+            case 'ScrollDown':
+                match ($this->mode) {
+                    Mode::Tables => $this->tableDown(),
+                    Mode::Data   => $this->rowDown(),
+                    Mode::Row    => $this->rowDown(),
+                    Mode::Sql    => $this->sqlResultDown(),
+                    Mode::SqlRow => $this->sqlResultDown(),
+                };
+                break;
+
+            case 'Down': // left-click
+                if ($this->mode === Mode::Sql || $this->mode === Mode::SqlRow) {
+                    // SQL layout: 5-line input block + 1 border + 1 header = data rows start at y=7
+                    $clicked = $y - 7;
+                    if ($clicked >= 0 && $clicked < count($this->sqlRows)) {
+                        $this->sqlRowIndex = $clicked;
+                        $this->mode        = Mode::SqlRow;
+                    }
+                    break;
+                }
+                if ($x < $leftPanelWidth) {
+                    // Click in table list — row 1 is border, row 2+ are table names
+                    $clicked = $y - 2; // subtract top border + header
+                    if ($clicked >= 0 && $clicked < count($this->tables)) {
+                        if ($this->tableIndex !== $clicked) {
+                            $this->tableIndex = $clicked;
+                            $this->loadTableData($this->selectedTable());
+                        }
+                    }
+                    $this->mode = Mode::Tables;
+                } else {
+                    // Click in data panel — row 1 is border, row 2 is header, row 3+ are data
+                    $clicked = $y - 3;
+                    if ($clicked >= 0 && $clicked < count($this->rows)) {
+                        if ($this->rowIndex === $clicked) {
+                            $this->enterRowDetail();
+                        } else {
+                            $this->rowIndex = $clicked;
+                        }
+                    }
+                    if ($this->mode !== Mode::Row) {
+                        $this->mode = Mode::Data;
+                    }
+                }
+                break;
+        }
+    }
+
+    // ── Per-mode coded-key handlers ───────────────────────────────────────
+
+    private function tablesCodedKey(string $code): void
+    {
+        match ($code) {
+            'Down'  => $this->tableDown(),
+            'Up'    => $this->tableUp(),
+            'Enter' => $this->mode = Mode::Data,
+            'Tab'   => $this->mode = Mode::Data,
+            'Right' => $this->mode = Mode::Data,
+            default => null,
+        };
+    }
+
+    private function dataCodedKey(string $code): void
+    {
+        match ($code) {
+            'Down'     => $this->rowDown(),
+            'Up'       => $this->rowUp(),
+            'Left'     => $this->mode = Mode::Tables,
+            'Tab'      => $this->mode = Mode::Tables,
+            'BackTab'  => $this->mode = Mode::Tables,
+            'Enter'    => $this->enterRowDetail(),
+            'PageDown' => $this->nextPage(),
+            'PageUp'   => $this->prevPage(),
+            'Home'     => $this->firstRow(),
+            'End'      => $this->lastRow(),
+            default    => null,
+        };
+    }
+
+    private function rowCodedKey(string $code): void
+    {
+        if ($this->isEditing) {
+            match ($code) {
+                'Enter'     => $this->confirmEdit(),
+                'Esc'       => $this->cancelEdit(),
+                'Backspace' => $this->editBuffer = mb_substr($this->editBuffer, 0, -1),
+                default     => null,
+            };
+            return;
+        }
+
+        match ($code) {
+            'Esc'   => $this->mode = Mode::Data,
+            'Down'  => $this->editFieldIndex = min($this->editFieldIndex + 1, count($this->currentRow()) - 1),
+            'Up'    => $this->editFieldIndex = max(0, $this->editFieldIndex - 1),
+            'Enter' => $this->startEditing(),
+            default => null,
+        };
+    }
+
+    private function sqlCodedKey(string $code): void
+    {
+        match ($code) {
+            'Esc'       => $this->mode = Mode::Tables,
+            'Enter'     => $this->executeSql(),
+            'Backspace' => $this->sqlBackspace(),
+            default     => null,
+        };
+    }
+
+    // ── Per-mode char-key handlers ────────────────────────────────────────
+
+    private function tablesCharKey(string $char): void
+    {
+        match ($char) {
+            'q' => $this->running = false,
+            's' => $this->enterSqlMode(),
+            'j' => $this->tableDown(),
+            'k' => $this->tableUp(),
+            default => null,
+        };
+    }
+
+    private function dataCharKey(string $char): void
+    {
+        match (true) {
+            $char === 'q' => $this->running = false,
+            $char === 's' => $this->enterSqlMode(),
+            $char === 'j' => $this->rowDown(),
+            $char === 'k' => $this->rowUp(),
+            $char === 'n' => $this->nextPage(),
+            $char === 'p' => $this->prevPage(),
+            // 1–9: sort by that column (1-indexed)
+            ctype_digit($char) && $char !== '0' => $this->toggleSort((int) $char - 1),
+            default => null,
+        };
+    }
+
+    private function rowCharKey(string $char): void
+    {
+        if ($this->isEditing) {
+            if ($char === "\x7f") {
+                $this->editBuffer = mb_substr($this->editBuffer, 0, -1);
+                return;
+            }
+            $this->editBuffer .= $char;
+            return;
+        }
+
+        match ($char) {
+            'q'     => $this->running = false,
+            'j'     => $this->editFieldIndex = min($this->editFieldIndex + 1, count($this->currentRow()) - 1),
+            'k'     => $this->editFieldIndex = max(0, $this->editFieldIndex - 1),
+            'e'     => $this->startEditing(),
+            's'     => $this->saveRow(),
+            default => null,
+        };
+    }
+
+    private function sqlCharKey(string $char): void
+    {
+        // Backspace via DEL character (some terminals)
+        if ($char === "\x7f") {
+            $this->sqlBackspace();
+            return;
+        }
+        $this->sqlInput .= $char;
+    }
+
+    private function sqlRowCodedKey(string $code): void
+    {
+        match ($code) {
+            'Esc'   => $this->mode = Mode::Sql,
+            'Down'  => $this->sqlResultDown(),
+            'Up'    => $this->sqlResultUp(),
+            default => null,
+        };
+    }
+
+    private function sqlRowCharKey(string $char): void
+    {
+        match ($char) {
+            'q'     => $this->running = false,
+            'j'     => $this->sqlResultDown(),
+            'k'     => $this->sqlResultUp(),
+            default => null,
+        };
+    }
+
+    // ── Navigation helpers ────────────────────────────────────────────────
+
+    private function tableDown(): void
+    {
+        if ($this->tableIndex < count($this->tables) - 1) {
+            $this->tableIndex++;
+            $this->loadTableData($this->selectedTable());
+        }
+    }
+
+    private function tableUp(): void
+    {
+        if ($this->tableIndex > 0) {
+            $this->tableIndex--;
+            $this->loadTableData($this->selectedTable());
+        }
+    }
+
+    private function rowDown(): void
+    {
+        if ($this->rowIndex < count($this->rows) - 1) {
+            $this->rowIndex++;
+        } elseif ($this->pageOffset() + count($this->rows) < $this->totalRows) {
+            $this->nextPage();
+            $this->rowIndex = 0;
+        }
+    }
+
+    private function rowUp(): void
+    {
+        if ($this->rowIndex > 0) {
+            $this->rowIndex--;
+        } elseif ($this->dataPage > 0) {
+            $this->prevPage();
+            $this->rowIndex = count($this->rows) - 1;
+        }
+    }
+
+    private function sqlResultDown(): void
+    {
+        if ($this->sqlRowIndex < count($this->sqlRows) - 1) {
+            $this->sqlRowIndex++;
+        }
+    }
+
+    private function sqlResultUp(): void
+    {
+        if ($this->sqlRowIndex > 0) {
+            $this->sqlRowIndex--;
+        }
+    }
+
+    /** @return array<string, mixed> */
+    public function currentSqlRow(): array
+    {
+        return $this->sqlRows[$this->sqlRowIndex] ?? [];
+    }
+
+    private function nextPage(): void
+    {
+        if ($this->pageOffset() + $this->limit < $this->totalRows) {
+            $this->dataPage++;
+            $this->rowIndex = 0;
+            $this->fetchRows();
+        }
+    }
+
+    private function prevPage(): void
+    {
+        if ($this->dataPage > 0) {
+            $this->dataPage--;
+            $this->rowIndex = 0;
+            $this->fetchRows();
+        }
+    }
+
+    private function firstRow(): void
+    {
+        $this->dataPage = 0;
+        $this->rowIndex = 0;
+        $this->fetchRows();
+    }
+
+    private function lastRow(): void
+    {
+        $lastPage = (int) floor(max(0, $this->totalRows - 1) / $this->limit);
+        if ($lastPage !== $this->dataPage) {
+            $this->dataPage = $lastPage;
+            $this->fetchRows();
+        }
+        $this->rowIndex = count($this->rows) - 1;
+    }
+
+    private function toggleSort(int $col): void
+    {
+        if ($col < 0 || $col >= count($this->columns)) {
+            return;
+        }
+
+        if ($this->sortColumn === $col) {
+            $this->sortDir = $this->sortDir === 'ASC' ? 'DESC' : 'ASC';
+        } else {
+            $this->sortColumn = $col;
+            $this->sortDir    = 'ASC';
+        }
+
+        $this->dataPage = 0;
+        $this->rowIndex = 0;
+        $this->fetchRows();
+    }
+
+    // ── Row editing ───────────────────────────────────────────────────────
+
+    private function enterRowDetail(): void
+    {
+        $this->mode           = Mode::Row;
+        $this->editFieldIndex = 0;
+        $this->isEditing      = false;
+        $this->editBuffer     = '';
+        $this->dirtyValues    = [];
+        $this->saveMessage    = null;
+    }
+
+    private function startEditing(): void
+    {
+        $row  = $this->currentRow();
+        $keys = array_keys($row);
+        $col  = $keys[$this->editFieldIndex] ?? null;
+        if ($col === null) {
+            return;
+        }
+        // Seed the buffer with the current (possibly already dirty) value
+        $current          = array_key_exists($col, $this->dirtyValues)
+            ? ($this->dirtyValues[$col] ?? '')
+            : ($row[$col] === null ? '' : (string) $row[$col]);
+        $this->editBuffer = $current;
+        $this->isEditing  = true;
+        $this->saveMessage = null;
+    }
+
+    private function confirmEdit(): void
+    {
+        $row  = $this->currentRow();
+        $keys = array_keys($row);
+        $col  = $keys[$this->editFieldIndex] ?? null;
+        if ($col === null) {
+            return;
+        }
+        // Empty string stays as empty string; user can type the literal word NULL to store null
+        $value = $this->editBuffer === 'NULL' ? null : $this->editBuffer;
+        $this->dirtyValues[$col] = $value;
+        $this->isEditing         = false;
+        $this->editBuffer        = '';
+    }
+
+    private function cancelEdit(): void
+    {
+        $this->isEditing  = false;
+        $this->editBuffer = '';
+    }
+
+    private function saveRow(): void
+    {
+        if (empty($this->dirtyValues)) {
+            $this->saveMessage = 'No changes to save.';
+            return;
+        }
+
+        try {
+            $table    = $this->selectedTable();
+            $original = $this->rows[$this->rowIndex];
+            $affected = $this->db->updateRow($table, $original, $this->dirtyValues);
+
+            $this->saveMessage = "Saved — {$affected} row updated.";
+            $this->dirtyValues = [];
+            $this->fetchRows();
+        } catch (\Throwable $e) {
+            $this->saveMessage = 'Error: ' . $e->getMessage();
+        }
+    }
+
+    // ── SQL mode ──────────────────────────────────────────────────────────
+
+    private function enterSqlMode(): void
+    {
+        $this->mode       = Mode::Sql;
+        $this->sqlInput   = '';
+        $this->sqlColumns = [];
+        $this->sqlRows    = [];
+        $this->sqlError   = null;
+    }
+
+    private function sqlBackspace(): void
+    {
+        if (mb_strlen($this->sqlInput) > 0) {
+            $this->sqlInput = mb_substr($this->sqlInput, 0, -1);
+        }
+    }
+
+    private function executeSql(): void
+    {
+        $sql = trim($this->sqlInput);
+        if ($sql === '') {
+            return;
+        }
+
+        try {
+            $result            = $this->db->executeRaw($sql);
+            $this->sqlColumns  = $result['columns'];
+            $this->sqlRows     = $result['rows'];
+            $this->sqlRowIndex = 0;
+            $this->sqlError    = null;
+        } catch (\Throwable $e) {
+            $this->sqlError    = $e->getMessage();
+            $this->sqlColumns  = [];
+            $this->sqlRows     = [];
+            $this->sqlRowIndex = 0;
+        }
+    }
+
+    // ── Data loading ──────────────────────────────────────────────────────
+
+    private function loadTableData(string $table): void
+    {
+        try {
+            $this->columns    = $this->db->getColumns($table);
+            $this->totalRows  = $this->db->getRowCount($table);
+            $this->dataPage   = 0;
+            $this->rowIndex   = 0;
+            $this->sortColumn = null;
+            $this->sortDir    = 'ASC';
+            $this->fetchRows();
+            $this->statusMessage = null;
+        } catch (\Throwable $e) {
+            $this->statusMessage = 'Error: ' . $e->getMessage();
+            $this->columns       = [];
+            $this->rows          = [];
+            $this->totalRows     = 0;
+        }
+    }
+
+    private function fetchRows(): void
+    {
+        try {
+            $table   = $this->selectedTable();
+            $sortCol = $this->sortColumn !== null ? ($this->columns[$this->sortColumn] ?? null) : null;
+            $this->rows          = $this->db->getRows($table, $this->pageOffset(), $this->limit, $sortCol, $this->sortDir);
+            $this->statusMessage = null;
+        } catch (\Throwable $e) {
+            $this->statusMessage = 'Error: ' . $e->getMessage();
+            $this->rows          = [];
+        }
+    }
+}
