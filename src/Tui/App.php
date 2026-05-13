@@ -51,6 +51,12 @@ class App
     // ── General ───────────────────────────────────────────────────────────
     public ?string $statusMessage = null;
     public bool    $running       = true;
+    private ?string $loadedTable  = null;
+
+    /** @var array<string, array{columns: string[], totalRows: int}> */
+    private array $tableMetaCache = [];
+    /** @var array<string, array<string, array<int, array<string, mixed>>>> */
+    private array $rowPageCache   = [];
 
     public function __construct(private readonly PdoConnection $db)
     {
@@ -71,6 +77,12 @@ class App
     public function selectedTable(): string
     {
         return $this->tables[$this->tableIndex] ?? '';
+    }
+
+    public function hasLoadedSelectedTable(): bool
+    {
+        $table = $this->selectedTable();
+        return $table !== '' && $table === $this->loadedTable;
     }
 
     /** @return array<string, mixed> */
@@ -165,6 +177,8 @@ class App
                     }
                     $this->mode = Mode::Tables;
                 } else {
+                    $this->ensureSelectedTableLoaded();
+
                     // Click in data panel — row 1 is border, row 2 is header, row 3+ are data
                     $clicked = $y - 3;
                     if ($clicked >= 0 && $clicked < count($this->rows)) {
@@ -186,14 +200,20 @@ class App
 
     private function tablesCodedKey(string $code): void
     {
-        match ($code) {
-            'Down'  => $this->tableDown(),
-            'Up'    => $this->tableUp(),
-            'Enter' => $this->mode = Mode::Data,
-            'Tab'   => $this->mode = Mode::Data,
-            'Right' => $this->mode = Mode::Data,
-            default => null,
-        };
+        switch ($code) {
+            case 'Down':
+                $this->tableDown();
+                break;
+            case 'Up':
+                $this->tableUp();
+                break;
+            case 'Enter':
+            case 'Tab':
+            case 'Right':
+                $this->ensureSelectedTableLoaded();
+                $this->mode = Mode::Data;
+                break;
+        }
     }
 
     private function dataCodedKey(string $code): void
@@ -329,7 +349,9 @@ class App
     {
         if ($this->tableIndex < count($this->tables) - 1) {
             $this->tableIndex++;
-            $this->loadTableData($this->selectedTable());
+            if ($this->mode !== Mode::Tables) {
+                $this->loadTableData($this->selectedTable());
+            }
         }
     }
 
@@ -337,7 +359,9 @@ class App
     {
         if ($this->tableIndex > 0) {
             $this->tableIndex--;
-            $this->loadTableData($this->selectedTable());
+            if ($this->mode !== Mode::Tables) {
+                $this->loadTableData($this->selectedTable());
+            }
         }
     }
 
@@ -498,6 +522,7 @@ class App
 
             $this->saveMessage = "Saved — {$affected} row updated.";
             $this->dirtyValues = [];
+            $this->invalidateRowsCache($table);
             $this->fetchRows();
         } catch (\Throwable $e) {
             $this->saveMessage = 'Error: ' . $e->getMessage();
@@ -535,6 +560,10 @@ class App
             $this->sqlRows     = $result['rows'];
             $this->sqlRowIndex = 0;
             $this->sqlError    = null;
+
+            if (!$this->isReadOnlySql($sql)) {
+                $this->invalidateAllDataCache();
+            }
         } catch (\Throwable $e) {
             $this->sqlError    = $e->getMessage();
             $this->sqlColumns  = [];
@@ -548,19 +577,31 @@ class App
     private function loadTableData(string $table): void
     {
         try {
-            $this->columns    = $this->db->getColumns($table);
-            $this->totalRows  = $this->db->getRowCount($table);
+            if (isset($this->tableMetaCache[$table])) {
+                $meta = $this->tableMetaCache[$table];
+            } else {
+                $meta = [
+                    'columns'   => $this->db->getColumns($table),
+                    'totalRows' => $this->db->getRowCount($table),
+                ];
+                $this->tableMetaCache[$table] = $meta;
+            }
+
+            $this->columns    = $meta['columns'];
+            $this->totalRows  = $meta['totalRows'];
             $this->dataPage   = 0;
             $this->rowIndex   = 0;
             $this->sortColumn = null;
             $this->sortDir    = 'ASC';
             $this->fetchRows();
             $this->statusMessage = null;
+            $this->loadedTable = $table;
         } catch (\Throwable $e) {
             $this->statusMessage = 'Error: ' . $e->getMessage();
             $this->columns       = [];
             $this->rows          = [];
             $this->totalRows     = 0;
+            $this->loadedTable   = null;
         }
     }
 
@@ -569,11 +610,51 @@ class App
         try {
             $table   = $this->selectedTable();
             $sortCol = $this->sortColumn !== null ? ($this->columns[$this->sortColumn] ?? null) : null;
-            $this->rows          = $this->db->getRows($table, $this->pageOffset(), $this->limit, $sortCol, $this->sortDir);
+            $pageKey = $this->buildPageCacheKey($this->pageOffset(), $this->limit, $sortCol, $this->sortDir);
+
+            if (isset($this->rowPageCache[$table][$pageKey])) {
+                $this->rows = $this->rowPageCache[$table][$pageKey];
+            } else {
+                $rows = $this->db->getRows($table, $this->pageOffset(), $this->limit, $sortCol, $this->sortDir);
+                $this->rowPageCache[$table][$pageKey] = $rows;
+                $this->rows = $rows;
+            }
             $this->statusMessage = null;
         } catch (\Throwable $e) {
             $this->statusMessage = 'Error: ' . $e->getMessage();
             $this->rows          = [];
         }
+    }
+
+    private function ensureSelectedTableLoaded(): void
+    {
+        $table = $this->selectedTable();
+        if ($table === '' || $table === $this->loadedTable) {
+            return;
+        }
+
+        $this->loadTableData($table);
+    }
+
+    private function buildPageCacheKey(int $offset, int $limit, ?string $sortCol, string $sortDir): string
+    {
+        return implode(':', [$offset, $limit, $sortCol ?? '', $sortDir]);
+    }
+
+    private function invalidateRowsCache(string $table): void
+    {
+        unset($this->rowPageCache[$table]);
+    }
+
+    private function invalidateAllDataCache(): void
+    {
+        $this->tableMetaCache = [];
+        $this->rowPageCache   = [];
+        $this->loadedTable    = null;
+    }
+
+    private function isReadOnlySql(string $sql): bool
+    {
+        return (bool) preg_match('/^\s*(SELECT|WITH|SHOW|DESCRIBE|DESC|PRAGMA|EXPLAIN)\b/i', $sql);
     }
 }

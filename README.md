@@ -25,6 +25,7 @@ An interactive terminal UI for browsing and editing your Laravel application's d
 - **Raw SQL mode** — type and execute arbitrary queries, click any result row to inspect it
 - **Saved connections** — store named connection URLs in `~/.laravel-db-tui.json`, outside any repo
 - **Remote connections** — connect to any MySQL, PostgreSQL, or SQLite database via URL
+- **Faster remote browsing** — table metadata/page results are cached in-memory during a session
 - **Mouse support** — click to select a table or row, scroll wheel to navigate
 - **Uses Laravel's existing config** — zero setup for the default database connection
 
@@ -112,7 +113,7 @@ php artisan db:tui --forget=production
 |---|---|
 | `↑` / `k` | Move up |
 | `↓` / `j` | Move down |
-| `Enter`, `Tab`, `→` | Switch focus to the data panel |
+| `Enter`, `Tab`, `→` | Load the selected table and switch focus to the data panel |
 | `s` | Open SQL editor |
 | `q` / `Ctrl+C` | Quit |
 
@@ -262,6 +263,8 @@ Sql is reachable from Tables or Data; Esc always returns to Tables.
 **Rendering** (`Renderer`): Stateless — called every frame (~60 fps), reads `App` and builds a `GridWidget` tree. php-tui diffs the widget tree against the previous frame before writing to the terminal.
 
 **Database** (`PdoConnection`): Raw PDO only — no Eloquent, no query builder. Identifiers are quoted per-driver to prevent injection from schema-derived names. Raw SQL mode executes user input directly (intentional for a developer tool). `updateRow()` uses the primary key as the `WHERE` predicate when available.
+
+**Performance** (`App`): While the TUI is open, per-table metadata (`columns`, `COUNT(*)`) and fetched pages are cached in memory. Moving through the table list no longer eagerly loads every highlighted table; load happens when you open a table with `Enter`/`Tab`/`→` (or click into the data panel).
 
 ## Customising
 

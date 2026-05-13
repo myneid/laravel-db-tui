@@ -102,6 +102,10 @@ class Renderer
             return $this->emptyBlock(' Data ', 'Select a table from the left panel');
         }
 
+        if (!$app->hasLoadedSelectedTable()) {
+            return $this->emptyBlock(" {$table} ", 'Press Enter/Tab/→ to load this table.');
+        }
+
         if ($app->statusMessage !== null) {
             return BlockWidget::default()
                 ->titles(Title::fromString(' Error '))
@@ -409,7 +413,7 @@ class Renderer
     {
         $text = match ($app->mode) {
             Mode::Tables =>
-                ' ↑↓/jk: table | Enter/Tab/→: data | s: SQL | q: quit',
+                ' ↑↓/jk: table | Enter/Tab/→: load table | s: SQL | q: quit',
             Mode::Data =>
                 ' ↑↓/jk: row | Tab/←: tables | Enter: detail | 1-9: sort | PgUp/n PgDn/p: page | s: SQL | q: quit',
             Mode::Row =>
