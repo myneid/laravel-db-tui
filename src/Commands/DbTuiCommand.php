@@ -221,6 +221,11 @@ class DbTuiCommand extends Command
             return PdoConnection::fromUrl($url);
         }
 
+        // --connection can also resolve a saved URL by name
+        if ($laravel && $savedUrl = ConnectionStore::get($laravel)) {
+            return PdoConnection::fromUrl($savedUrl);
+        }
+
         return PdoConnection::fromLaravel($laravel ?: null);
     }
 }
