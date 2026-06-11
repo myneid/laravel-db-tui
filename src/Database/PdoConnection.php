@@ -6,6 +6,7 @@ class PdoConnection
 {
     private \PDO $pdo;
     private string $driver;
+    private ?SshTunnel $tunnel = null;
 
     public function __construct(\PDO $pdo, string $driver)
     {
@@ -63,6 +64,9 @@ class PdoConnection
                 $driver = 'pgsql';
                 break;
 
+            case 'mysql+ssh':
+                return self::fromSshUrl($parsed);
+
             default:
                 // Pass through raw DSN strings (e.g. "mysql:host=...")
                 $dsn    = $url;
@@ -75,6 +79,77 @@ class PdoConnection
         ]);
 
         return new self($pdo, $driver);
+    }
+
+    /**
+     * @param array<string, mixed> $parsed  result of parse_url() on a mysql+ssh:// URL
+     */
+    private static function fromSshUrl(array $parsed): self
+    {
+        $sshUser = isset($parsed['user']) ? urldecode($parsed['user']) : 'root';
+        $sshHost = $parsed['host'] ?? 'localhost';
+        $sshPort = $parsed['port'] ?? 22;
+
+        parse_str($parsed['query'] ?? '', $query);
+        $usePrivateKey = filter_var($query['usePrivateKey'] ?? false, FILTER_VALIDATE_BOOLEAN);
+
+        $db        = self::parseSshDbPath($parsed['path'] ?? '');
+        $tunnel    = new SshTunnel($sshUser, $sshHost, (int) $sshPort, $db['host'], $db['port'], $usePrivateKey);
+        $localPort = $tunnel->getLocalPort();
+
+        $dsn = 'mysql:host=127.0.0.1;port=' . $localPort
+             . ($db['name'] ? ';dbname=' . $db['name'] : '')
+             . ';charset=utf8mb4';
+
+        $pdo  = new \PDO($dsn, $db['user'], $db['pass'], [
+            \PDO::ATTR_ERRMODE            => \PDO::ERRMODE_EXCEPTION,
+            \PDO::ATTR_DEFAULT_FETCH_MODE => \PDO::FETCH_ASSOC,
+        ]);
+
+        $conn         = new self($pdo, 'mysql');
+        $conn->tunnel = $tunnel;
+        return $conn;
+    }
+
+    /**
+     * Parse the DB-credentials portion of a mysql+ssh URL path.
+     * Expected format: /db_user:db_pass@db_host[:db_port]/db_name
+     *
+     * @return array{user: string, pass: ?string, host: string, port: int, name: string}
+     */
+    private static function parseSshDbPath(string $path): array
+    {
+        $path  = ltrim($path, '/');
+        $atPos = strrpos($path, '@');
+
+        if ($atPos === false) {
+            throw new \RuntimeException(
+                'Invalid mysql+ssh URL. Expected: mysql+ssh://ssh_user@ssh_host/db_user:db_pass@db_host/db_name'
+            );
+        }
+
+        $creds     = substr($path, 0, $atPos);
+        $hostAndDb = substr($path, $atPos + 1);
+
+        $colonPos = strpos($creds, ':');
+        $dbUser   = urldecode($colonPos !== false ? substr($creds, 0, $colonPos) : $creds);
+        $dbPass   = $colonPos !== false ? urldecode(substr($creds, $colonPos + 1)) : null;
+
+        $slashPos = strpos($hostAndDb, '/');
+        $hostPort = $slashPos !== false ? substr($hostAndDb, 0, $slashPos) : $hostAndDb;
+        $dbName   = $slashPos !== false ? substr($hostAndDb, $slashPos + 1) : '';
+
+        $colonPos = strpos($hostPort, ':');
+        $dbHost   = $colonPos !== false ? substr($hostPort, 0, $colonPos) : $hostPort;
+        $dbPort   = $colonPos !== false ? (int) substr($hostPort, $colonPos + 1) : 3306;
+
+        return [
+            'user' => $dbUser,
+            'pass' => $dbPass,
+            'host' => $dbHost ?: '127.0.0.1',
+            'port' => $dbPort,
+            'name' => $dbName,
+        ];
     }
 
     public function getDriver(): string
