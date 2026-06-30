@@ -286,6 +286,8 @@ class App
             $char === 'k' => $this->rowUp(),
             $char === 'n' => $this->nextPage(),
             $char === 'p' => $this->prevPage(),
+            $char === 'y' => $this->copyCurrentCell(),
+            $char === 'Y' => $this->copyCurrentRow(),
             // 1–9: sort by that column (1-indexed)
             ctype_digit($char) && $char !== '0' => $this->toggleSort((int) $char - 1),
             default => null,
@@ -309,6 +311,7 @@ class App
             'k'     => $this->editFieldIndex = max(0, $this->editFieldIndex - 1),
             'e'     => $this->startEditing(),
             's'     => $this->saveRow(),
+            'y'     => $this->copySelectedField(),
             default => null,
         };
     }
@@ -338,6 +341,7 @@ class App
         match ($char) {
             'q'     => $this->running = false,
             'j'     => $this->sqlResultDown(),
+            'y'     => $this->copySqlRowField(),
             'k'     => $this->sqlResultUp(),
             default => null,
         };
@@ -656,5 +660,144 @@ class App
     private function isReadOnlySql(string $sql): bool
     {
         return (bool) preg_match('/^\s*(SELECT|WITH|SHOW|DESCRIBE|DESC|PRAGMA|EXPLAIN)\b/i', $sql);
+    }
+
+    // ── Copy to clipboard ─────────────────────────────────────────────────
+
+    /**
+     * Copy text to system clipboard.
+     */
+    private function copyToClipboard(string $text): bool
+    {
+        // Escape for shell
+        $escaped = escapeshellarg($text);
+
+        // Try pbcopy (macOS)
+        if (file_exists('/usr/bin/pbcopy') || file_exists('/usr/local/bin/pbcopy')) {
+            shell_exec("echo {$escaped} | pbcopy");
+            return true;
+        }
+
+        // Try xclip (Linux)
+        if (shell_exec('which xclip 2>/dev/null')) {
+            shell_exec("echo {$escaped} | xclip -selection clipboard");
+            return true;
+        }
+
+        // Try xsel (Linux)
+        if (shell_exec('which xsel 2>/dev/null')) {
+            shell_exec("echo {$escaped} | xsel --clipboard --input");
+            return true;
+        }
+
+        // Try wl-copy (Wayland)
+        if (shell_exec('which wl-copy 2>/dev/null')) {
+            shell_exec("echo {$escaped} | wl-copy");
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * Copy the currently selected row in Data mode as tab-separated values.
+     */
+    private function copyCurrentCell(): void
+    {
+        $row = $this->currentRow();
+        if (empty($row)) {
+            $this->statusMessage = 'No row selected.';
+            return;
+        }
+
+        $values = array_map(fn ($v) => $v === null ? 'NULL' : (string) $v, $row);
+        $text = implode("\t", $values);
+
+        if ($this->copyToClipboard($text)) {
+            $count = count($row);
+            $this->statusMessage = "Copied row ({$count} columns)";
+        } else {
+            $this->statusMessage = 'Failed to copy to clipboard.';
+        }
+    }
+
+    /**
+     * Copy the current row as JSON in Data mode.
+     */
+    private function copyCurrentRow(): void
+    {
+        $row = $this->currentRow();
+        if (empty($row)) {
+            $this->statusMessage = 'No row selected.';
+            return;
+        }
+
+        $json = json_encode($row, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+        if ($json === false) {
+            $this->statusMessage = 'Failed to encode row as JSON.';
+            return;
+        }
+
+        if ($this->copyToClipboard($json)) {
+            $this->statusMessage = "Copied row as JSON";
+        } else {
+            $this->statusMessage = 'Failed to copy to clipboard.';
+        }
+    }
+
+    /**
+     * Copy the selected field value in Row detail view.
+     */
+    private function copySelectedField(): void
+    {
+        $row = $this->currentRow();
+        if (empty($row)) {
+            $this->statusMessage = 'No row selected.';
+            return;
+        }
+
+        $keys = array_keys($row);
+        if (!isset($keys[$this->editFieldIndex])) {
+            $this->statusMessage = 'No field selected.';
+            return;
+        }
+
+        $colName = $keys[$this->editFieldIndex];
+        $isDirty = array_key_exists($colName, $this->dirtyValues);
+        $value = $isDirty
+            ? ($this->dirtyValues[$colName] ?? null)
+            : ($row[$colName] ?? null);
+
+        $textValue = $value === null ? 'NULL' : (string) $value;
+
+        if ($this->copyToClipboard($textValue)) {
+            $display = mb_strlen($textValue) > 50 ? mb_substr($textValue, 0, 50) . '…' : $textValue;
+            $this->statusMessage = "Copied: {$display}";
+        } else {
+            $this->statusMessage = 'Failed to copy to clipboard.';
+        }
+    }
+
+    /**
+     * Copy the selected cell from SQL results.
+     */
+    private function copySqlRowField(): void
+    {
+        $row = $this->currentSqlRow();
+        if (empty($row)) {
+            $this->statusMessage = 'No row selected.';
+            return;
+        }
+
+        // Copy entire row as tab-separated for SQL results
+        $values = array_map(fn ($v) => $v === null ? 'NULL' : (string) $v, $row);
+        $text = implode("\t", $values);
+
+        if ($this->copyToClipboard($text)) {
+            $count = count($row);
+            $this->statusMessage = "Copied row ({$count} columns)";
+        } else {
+            $this->statusMessage = 'Failed to copy to clipboard.';
+        }
     }
 }

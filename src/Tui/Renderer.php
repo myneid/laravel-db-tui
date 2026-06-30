@@ -415,13 +415,13 @@ class Renderer
             Mode::Tables =>
                 ' ↑↓/jk: table | Enter/Tab/→: load table | s: SQL | q: quit',
             Mode::Data =>
-                ' ↑↓/jk: row | Tab/←: tables | Enter: detail | 1-9: sort | PgUp/n PgDn/p: page | s: SQL | q: quit',
+                ' ↑↓/jk: row | Tab/←: tables | Enter: detail | y: copy row | Y: copy as JSON | 1-9: sort | PgUp/n PgDn/p: page | s: SQL | q: quit',
             Mode::Row =>
-                ' ↑↓/jk: field  e/Enter: edit  s: save  Esc: back  q: quit  (type NULL to store null)',
+                ' ↑↓/jk: field  e/Enter: edit  s: save  y: copy  Esc: back  q: quit  (type NULL to store null)',
             Mode::Sql =>
                 ' Type SQL | Enter: execute | click row: detail | ↑↓/jk: navigate results | Esc: back',
             Mode::SqlRow =>
-                ' Esc: back to SQL results | ↑↓/jk: prev/next row | q: quit',
+                ' Esc: back to SQL results | ↑↓/jk: prev/next row | y: copy | q: quit',
         };
 
         return ParagraphWidget::fromText(Text::fromString($text));
