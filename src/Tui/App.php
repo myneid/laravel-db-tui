@@ -39,6 +39,9 @@ class App
     public array   $sqlRows     = [];
     public ?string $sqlError    = null;
     public int     $sqlRowIndex = 0;  // selected row in the results table
+    /** @var string[] */
+    public array   $sqlSuggestions = [];
+    public int     $sqlSuggestionIndex = 0;
 
     // ── Row editing ───────────────────────────────────────────────────────
     public int     $editFieldIndex = 0;    // focused field in the detail view
@@ -52,11 +55,14 @@ class App
     public ?string $statusMessage = null;
     public bool    $running       = true;
     private ?string $loadedTable  = null;
+    private Mode $sqlReturnMode   = Mode::Tables;
 
     /** @var array<string, array{columns: string[], totalRows: int}> */
     private array $tableMetaCache = [];
     /** @var array<string, array<string, array<int, array<string, mixed>>>> */
     private array $rowPageCache   = [];
+    /** @var array<string, string[]> */
+    private array $columnCache = [];
 
     public function __construct(private readonly PdoConnection $db)
     {
@@ -113,6 +119,11 @@ class App
     {
         if ($ctrl && $char === 'c') {
             $this->running = false;
+            return;
+        }
+
+        if ($ctrl && $char === 'e' && $this->mode !== Mode::Sql && $this->mode !== Mode::SqlRow) {
+            $this->enterSqlMode($this->mode);
             return;
         }
 
@@ -257,9 +268,12 @@ class App
     private function sqlCodedKey(string $code): void
     {
         match ($code) {
-            'Esc'       => $this->mode = Mode::Tables,
+            'Esc'       => $this->closeSqlMode(),
             'Enter'     => $this->executeSql(),
             'Backspace' => $this->sqlBackspace(),
+            'Tab'       => $this->acceptSqlSuggestion(),
+            'Down'      => $this->sqlSuggestionDown(),
+            'Up'        => $this->sqlSuggestionUp(),
             default     => null,
         };
     }
@@ -270,7 +284,7 @@ class App
     {
         match ($char) {
             'q' => $this->running = false,
-            's' => $this->enterSqlMode(),
+            's', ':' => $this->enterSqlMode(Mode::Tables),
             'j' => $this->tableDown(),
             'k' => $this->tableUp(),
             default => null,
@@ -281,7 +295,7 @@ class App
     {
         match (true) {
             $char === 'q' => $this->running = false,
-            $char === 's' => $this->enterSqlMode(),
+            $char === 's' || $char === ':' => $this->enterSqlMode(Mode::Data),
             $char === 'j' => $this->rowDown(),
             $char === 'k' => $this->rowUp(),
             $char === 'n' => $this->nextPage(),
@@ -310,6 +324,7 @@ class App
             'j'     => $this->editFieldIndex = min($this->editFieldIndex + 1, count($this->currentRow()) - 1),
             'k'     => $this->editFieldIndex = max(0, $this->editFieldIndex - 1),
             'e'     => $this->startEditing(),
+            ':'     => $this->enterSqlMode(Mode::Row),
             's'     => $this->saveRow(),
             'y'     => $this->copySelectedField(),
             default => null,
@@ -323,7 +338,13 @@ class App
             $this->sqlBackspace();
             return;
         }
+
+        if ($char === "\n" || $char === "\r") {
+            return;
+        }
+
         $this->sqlInput .= $char;
+        $this->refreshSqlSuggestions();
     }
 
     private function sqlRowCodedKey(string $code): void
@@ -535,19 +556,28 @@ class App
 
     // ── SQL mode ──────────────────────────────────────────────────────────
 
-    private function enterSqlMode(): void
+    private function enterSqlMode(Mode $returnMode): void
     {
-        $this->mode       = Mode::Sql;
-        $this->sqlInput   = '';
-        $this->sqlColumns = [];
-        $this->sqlRows    = [];
-        $this->sqlError   = null;
+        $this->sqlReturnMode      = $returnMode;
+        $this->mode               = Mode::Sql;
+        $this->sqlInput           = '';
+        $this->sqlColumns         = [];
+        $this->sqlRows            = [];
+        $this->sqlError           = null;
+        $this->sqlSuggestions     = [];
+        $this->sqlSuggestionIndex = 0;
+    }
+
+    private function closeSqlMode(): void
+    {
+        $this->mode = $this->sqlReturnMode;
     }
 
     private function sqlBackspace(): void
     {
         if (mb_strlen($this->sqlInput) > 0) {
             $this->sqlInput = mb_substr($this->sqlInput, 0, -1);
+            $this->refreshSqlSuggestions();
         }
     }
 
@@ -574,6 +604,184 @@ class App
             $this->sqlRows     = [];
             $this->sqlRowIndex = 0;
         }
+    }
+
+    private function sqlSuggestionDown(): void
+    {
+        if (empty($this->sqlSuggestions)) {
+            $this->sqlResultDown();
+            return;
+        }
+
+        $max = count($this->sqlSuggestions) - 1;
+        $this->sqlSuggestionIndex = min($this->sqlSuggestionIndex + 1, $max);
+    }
+
+    private function sqlSuggestionUp(): void
+    {
+        if (empty($this->sqlSuggestions)) {
+            $this->sqlResultUp();
+            return;
+        }
+
+        $this->sqlSuggestionIndex = max(0, $this->sqlSuggestionIndex - 1);
+    }
+
+    private function acceptSqlSuggestion(): void
+    {
+        if (empty($this->sqlSuggestions)) {
+            return;
+        }
+
+        $picked = $this->sqlSuggestions[$this->sqlSuggestionIndex] ?? null;
+        if ($picked === null) {
+            return;
+        }
+
+        // table_or_alias.col_prefix
+        if (preg_match('/([A-Za-z_][A-Za-z0-9_]*\.)[A-Za-z0-9_]*$/', $this->sqlInput, $m) === 1) {
+            $prefix = $m[1];
+            $this->sqlInput = preg_replace('/([A-Za-z_][A-Za-z0-9_]*\.)[A-Za-z0-9_]*$/', $prefix . $picked, $this->sqlInput) ?? $this->sqlInput;
+        } else {
+            $this->sqlInput = preg_replace('/[A-Za-z0-9_]*$/', $picked, $this->sqlInput) ?? $this->sqlInput;
+        }
+
+        $this->sqlInput .= ' ';
+        $this->refreshSqlSuggestions();
+    }
+
+    private function refreshSqlSuggestions(): void
+    {
+        $this->sqlSuggestions = $this->buildSqlSuggestions($this->sqlInput);
+        if (empty($this->sqlSuggestions)) {
+            $this->sqlSuggestionIndex = 0;
+            return;
+        }
+        $this->sqlSuggestionIndex = min($this->sqlSuggestionIndex, count($this->sqlSuggestions) - 1);
+    }
+
+    /** @return string[] */
+    private function buildSqlSuggestions(string $sql): array
+    {
+        $matches = [];
+
+        // If user typed table_or_alias.<prefix>, suggest columns from that table.
+        if (preg_match('/([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z0-9_]*)$/', $sql, $m) === 1) {
+            $owner       = $m[1];
+            $colPrefix   = strtolower($m[2]);
+            $tableByName = $this->extractTableAliases($sql);
+            $table       = $tableByName[$owner] ?? $owner;
+            return $this->filterByPrefix($this->getColumnsCached($table), $colPrefix);
+        }
+
+        $prefix = $this->currentIdentifierPrefix($sql);
+        $lowerPrefix = strtolower($prefix);
+
+        if ($this->isExpectingTableName($sql)) {
+            return $this->filterByPrefix($this->tables, $lowerPrefix);
+        }
+
+        if ($this->isExpectingColumnName($sql)) {
+            $tables = $this->extractTableAliases($sql);
+
+            if (empty($tables)) {
+                $selected = $this->selectedTable();
+                if ($selected !== '') {
+                    $matches = $this->getColumnsCached($selected);
+                }
+            } else {
+                foreach (array_unique(array_values($tables)) as $table) {
+                    $matches = array_merge($matches, $this->getColumnsCached($table));
+                }
+            }
+
+            $matches = array_values(array_unique($matches));
+            sort($matches);
+            return $this->filterByPrefix($matches, $lowerPrefix);
+        }
+
+        // Generic fallback: SQL keywords + table names.
+        $keywords = [
+            'SELECT', 'FROM', 'WHERE', 'JOIN', 'LEFT JOIN', 'RIGHT JOIN', 'INNER JOIN',
+            'ORDER BY', 'GROUP BY', 'LIMIT', 'OFFSET', 'INSERT INTO', 'UPDATE', 'DELETE FROM',
+        ];
+
+        $base = array_merge($keywords, $this->tables);
+        return $this->filterByPrefix($base, $lowerPrefix);
+    }
+
+    private function currentIdentifierPrefix(string $sql): string
+    {
+        if (preg_match('/([A-Za-z0-9_]*)$/', $sql, $m) !== 1) {
+            return '';
+        }
+
+        return $m[1];
+    }
+
+    private function isExpectingTableName(string $sql): bool
+    {
+        return preg_match('/\b(from|join|update|into|table|describe|desc)\s+[A-Za-z0-9_]*$/i', $sql) === 1;
+    }
+
+    private function isExpectingColumnName(string $sql): bool
+    {
+        return preg_match('/\b(select|where|and|or|on|having|set|order\s+by|group\s+by)\s+[A-Za-z0-9_,\s]*$/i', $sql) === 1;
+    }
+
+    /**
+     * @return array<string, string> alias_or_table => table
+     */
+    private function extractTableAliases(string $sql): array
+    {
+        $aliases = [];
+        if (preg_match_all('/\b(from|join|update|into)\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+(?:as\s+)?([A-Za-z_][A-Za-z0-9_]*))?/i', $sql, $m, PREG_SET_ORDER) !== false) {
+            foreach ($m as $match) {
+                $table = $match[2];
+                $alias = $match[3] ?? '';
+                $aliases[$table] = $table;
+                if ($alias !== '') {
+                    $aliases[$alias] = $table;
+                }
+            }
+        }
+
+        return $aliases;
+    }
+
+    /** @return string[] */
+    private function getColumnsCached(string $table): array
+    {
+        if ($table === '') {
+            return [];
+        }
+
+        if (!isset($this->columnCache[$table])) {
+            try {
+                $this->columnCache[$table] = $this->db->getColumns($table);
+            } catch (\Throwable) {
+                $this->columnCache[$table] = [];
+            }
+        }
+
+        return $this->columnCache[$table];
+    }
+
+    /** @param string[] $values
+     *  @return string[]
+     */
+    private function filterByPrefix(array $values, string $prefix): array
+    {
+        if ($prefix === '') {
+            return array_slice(array_values(array_unique($values)), 0, 10);
+        }
+
+        $filtered = array_values(array_filter(
+            array_values(array_unique($values)),
+            fn (string $v) => str_starts_with(strtolower($v), $prefix)
+        ));
+
+        return array_slice($filtered, 0, 10);
     }
 
     // ── Data loading ──────────────────────────────────────────────────────
@@ -654,6 +862,7 @@ class App
     {
         $this->tableMetaCache = [];
         $this->rowPageCache   = [];
+        $this->columnCache    = [];
         $this->loadedTable    = null;
     }
 

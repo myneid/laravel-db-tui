@@ -20,7 +20,6 @@ use PhpTui\Tui\Style\Modifier;
 use PhpTui\Tui\Color\AnsiColor;
 use PhpTui\Tui\Text\Text;
 use PhpTui\Tui\Text\Line;
-use PhpTui\Tui\Text\Span;
 use PhpTui\Tui\Text\Title;
 
 class Renderer
@@ -28,6 +27,7 @@ class Renderer
     private const LEFT_WIDTH   = 32;
     private const TRUNCATE     = 48;
     private const DETAIL_WRAP  = 60;  // value column wrap width in row detail view
+    private const SQL_MODAL_HEIGHT = 22;
 
     public function build(App $app): mixed
     {
@@ -267,7 +267,7 @@ class Renderer
     private function buildSql(App $app): mixed
     {
         $inputWidget = BlockWidget::default()
-            ->titles(Title::fromString(' SQL  Enter: run  |  Esc: back '))
+            ->titles(Title::fromString(' SQL Popup  Enter: run  Tab: complete  Esc: close '))
             ->borders(Borders::ALL)
             ->borderType(BorderType::Double)
             ->widget(
@@ -277,18 +277,73 @@ class Renderer
                 )
             );
 
-        return GridWidget::default()
+        $suggestions = $this->buildSqlSuggestions($app);
+
+        $modal = GridWidget::default()
             ->direction(Direction::Vertical)
             ->constraints(
                 Constraint::length(5),
+                Constraint::length(4),
                 Constraint::min(3),
                 Constraint::length(1)
             )
             ->widgets(
                 $inputWidget,
+                $suggestions,
                 $this->buildSqlResults($app),
-                $this->buildHelpBar($app)
+                ParagraphWidget::fromText(Text::fromString(' Ctrl+E/:/s: open SQL | Enter: run | Tab: complete | ↑↓: pick suggestion/results | Esc: close '))
             );
+
+        return GridWidget::default()
+            ->direction(Direction::Vertical)
+            ->constraints(
+                Constraint::min(1),
+                Constraint::length(self::SQL_MODAL_HEIGHT),
+                Constraint::min(1)
+            )
+            ->widgets(
+                ParagraphWidget::fromText(Text::fromString('')),
+                GridWidget::default()
+                    ->direction(Direction::Horizontal)
+                    ->constraints(
+                        Constraint::percentage(10),
+                        Constraint::percentage(80),
+                        Constraint::percentage(10)
+                    )
+                    ->widgets(
+                        ParagraphWidget::fromText(Text::fromString('')),
+                        BlockWidget::default()
+                            ->titles(Title::fromString(' Query Runner '))
+                            ->borders(Borders::ALL)
+                            ->borderType(BorderType::Rounded)
+                            ->widget($modal),
+                        ParagraphWidget::fromText(Text::fromString(''))
+                    ),
+                ParagraphWidget::fromText(Text::fromString(''))
+            );
+    }
+
+    private function buildSqlSuggestions(App $app): mixed
+    {
+        if (empty($app->sqlSuggestions)) {
+            return BlockWidget::default()
+                ->titles(Title::fromString(' Suggestions '))
+                ->borders(Borders::ALL)
+                ->borderType(BorderType::Rounded)
+                ->widget(ParagraphWidget::fromText(Text::fromString('No suggestions')));
+        }
+
+        $lines = [];
+        foreach ($app->sqlSuggestions as $i => $suggestion) {
+            $prefix  = $i === $app->sqlSuggestionIndex ? '▶ ' : '  ';
+            $lines[] = $prefix . $suggestion;
+        }
+
+        return BlockWidget::default()
+            ->titles(Title::fromString(' Suggestions '))
+            ->borders(Borders::ALL)
+            ->borderType(BorderType::Rounded)
+            ->widget(ParagraphWidget::fromText(Text::fromString(implode("\n", $lines))));
     }
 
     private function buildSqlResults(App $app): mixed
@@ -413,13 +468,13 @@ class Renderer
     {
         $text = match ($app->mode) {
             Mode::Tables =>
-                ' ↑↓/jk: table | Enter/Tab/→: load table | s: SQL | q: quit',
+                ' ↑↓/jk: table | Enter/Tab/→: load table | :/s/Ctrl+E: SQL popup | q: quit',
             Mode::Data =>
-                ' ↑↓/jk: row | Tab/←: tables | Enter: detail | y: copy row | Y: copy as JSON | 1-9: sort | PgUp/n PgDn/p: page | s: SQL | q: quit',
+                ' ↑↓/jk: row | Tab/←: tables | Enter: detail | y: copy row | Y: copy as JSON | 1-9: sort | PgUp/n PgDn/p: page | :/s/Ctrl+E: SQL popup | q: quit',
             Mode::Row =>
-                ' ↑↓/jk: field  e/Enter: edit  s: save  y: copy  Esc: back  q: quit  (type NULL to store null)',
+                ' ↑↓/jk: field  e/Enter: edit  s: save  :/Ctrl+E: SQL popup  y: copy  Esc: back  q: quit  (type NULL to store null)',
             Mode::Sql =>
-                ' Type SQL | Enter: execute | click row: detail | ↑↓/jk: navigate results | Esc: back',
+                ' Type SQL | Tab: complete | Enter: execute | click row: detail | ↑↓: suggest/results | Esc: close popup',
             Mode::SqlRow =>
                 ' Esc: back to SQL results | ↑↓/jk: prev/next row | y: copy | q: quit',
         };

@@ -22,7 +22,8 @@ An interactive terminal UI for browsing and editing your Laravel application's d
 - **Sort columns** — press `1`–`9` to sort by that column, again to toggle ASC/DESC
 - **Inspect rows** — press `Enter` on a row to see every field in a word-wrapped key/value layout
 - **Edit and save rows** — edit any field in the detail view and write it back to the database
-- **Raw SQL mode** — type and execute arbitrary queries, click any result row to inspect it
+- **SQL popup runner** — open a query window from anywhere, execute SQL, and inspect results
+- **Context-aware autocomplete** — table names after `FROM/JOIN`, columns in `SELECT/WHERE`, `alias.column` completion with `Tab`
 - **Saved connections** — store named connection URLs in `~/.laravel-db-tui.json`, outside any repo
 - **Remote connections** — connect to any MySQL, PostgreSQL, or SQLite database via URL
 - **Faster remote browsing** — table metadata/page results are cached in-memory during a session
@@ -114,7 +115,7 @@ php artisan db:tui --forget=production
 | `↑` / `k` | Move up |
 | `↓` / `j` | Move down |
 | `Enter`, `Tab`, `→` | Load the selected table and switch focus to the data panel |
-| `s` | Open SQL editor |
+| `s`, `:`, `Ctrl+E` | Open SQL popup |
 | `q` / `Ctrl+C` | Quit |
 
 ### Data panel (right)
@@ -130,7 +131,7 @@ php artisan db:tui --forget=production
 | `PgDn` / `n` | Next page |
 | `Home` | First page, first row |
 | `End` | Last page, last row |
-| `s` | Open SQL editor |
+| `s`, `:`, `Ctrl+E` | Open SQL popup |
 | `q` / `Ctrl+C` | Quit |
 
 ### Row detail view
@@ -156,8 +157,11 @@ Saving uses the table's primary key as the `WHERE` clause when one is detected, 
 ### SQL editor
 
 ```
-┌─ SQL  Enter: run  |  Esc: back ────────────────────────────────────────────────┐
+┌─ SQL Popup  Enter: run  |  Tab: complete  |  Esc: close ───────────────────────┐
 │ SELECT * FROM users WHERE email LIKE '%@example.com'█                          │
+│ Suggestions:                                                                    │
+│ ▶ users                                                                         │
+│   user_profiles                                                                 │
 ├─ Results (3 rows) ─────────────────────────────────────────────────────────────┤
 │  id  │ name         │ email                │ created_at                         │
 │▶ 1   │ Alice Nguyen │ alice@example.com    │ 2024-01-01 00:00:00                │
@@ -169,10 +173,16 @@ Saving uses the table's primary key as the `WHERE` clause when one is detected, 
 |---|---|
 | Type normally | Build your query |
 | `Backspace` | Delete last character |
+| `Tab` | Accept the selected suggestion |
+| `↑` / `↓` | Move through suggestions (or results when no suggestions are shown) |
 | `Enter` | Execute the query |
-| `↑` / `k` | Move to previous result row |
-| `↓` / `j` | Move to next result row |
-| `Esc` | Back to browse mode |
+| `Esc` | Close popup and return to previous mode |
+
+Autocomplete is context-aware:
+
+- after `FROM`, `JOIN`, `UPDATE`, `INTO`: suggests table names
+- after `SELECT`, `WHERE`, `ON`, `ORDER BY`, `GROUP BY`: suggests columns from tables in your query
+- for `alias.` or `table.`: suggests matching columns for that alias/table
 
 Non-`SELECT` statements (INSERT, UPDATE, DELETE, CREATE, etc.) are supported — the results panel shows the number of affected rows.
 
@@ -255,7 +265,7 @@ Tables ⇄ Data → Row (edit + save)
               ↘
               Sql → SqlRow (read-only detail)
 
-Sql is reachable from Tables or Data; Esc always returns to Tables.
+Sql popup is reachable from Tables/Data/Row with `s`, `:`, or `Ctrl+E`; Esc returns to the previous mode.
 ```
 
 **Editing** (`App`): Row detail tracks `editFieldIndex`, `isEditing`, `editBuffer`, and `dirtyValues`. Confirming an edit stages the change in `dirtyValues`; pressing `s` flushes all staged changes in a single `UPDATE` statement and refreshes the page.
