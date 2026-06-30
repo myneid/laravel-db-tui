@@ -212,7 +212,10 @@ class Renderer
             // Value cell
             if ($isEditing) {
                 // Show the live edit buffer with a cursor
-                $valueText  = Text::fromString($app->editBuffer . '█');
+                $cursor = max(0, min($app->editCursor, mb_strlen($app->editBuffer)));
+                $before = mb_substr($app->editBuffer, 0, $cursor);
+                $after  = mb_substr($app->editBuffer, $cursor);
+                $valueText  = Text::fromString($before . '█' . $after);
                 $valueCell  = new TableCell($valueText, Style::default()->fg(AnsiColor::Black)->bg(AnsiColor::Yellow));
                 $height     = 1;
             } else {
@@ -237,7 +240,7 @@ class Renderer
 
         // Status line (save feedback or editing hint)
         $statusText = $app->saveMessage
-            ?? ($app->isEditing ? 'Enter: confirm  Esc: cancel edit' : 'e/Enter: edit field  s: save  Esc: back');
+            ?? ($app->isEditing ? 'Arrows/Home/End: move  Backspace/Delete: edit  Enter: confirm  Esc: cancel' : 'e/Enter: edit field  s: save  Esc: back');
 
         return GridWidget::default()
             ->direction(Direction::Vertical)

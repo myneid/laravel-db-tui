@@ -47,6 +47,7 @@ class App
     public int     $editFieldIndex = 0;    // focused field in the detail view
     public bool    $isEditing      = false; // actively typing a new value
     public string  $editBuffer     = '';
+    public int     $editCursor     = 0;     // cursor offset inside editBuffer
     /** @var array<string, string|null> */
     public array   $dirtyValues    = [];    // unsaved edits: col => new value
     public ?string $saveMessage    = null;  // feedback after save attempt
@@ -130,7 +131,7 @@ class App
         match ($this->mode) {
             Mode::Tables  => $this->tablesCharKey($char),
             Mode::Data    => $this->dataCharKey($char),
-            Mode::Row     => $this->rowCharKey($char),
+            Mode::Row     => $this->rowCharKey($char, $ctrl),
             Mode::Sql     => $this->sqlCharKey($char),
             Mode::SqlRow  => $this->sqlRowCharKey($char),
         };
@@ -250,7 +251,12 @@ class App
             match ($code) {
                 'Enter'     => $this->confirmEdit(),
                 'Esc'       => $this->cancelEdit(),
-                'Backspace' => $this->editBuffer = mb_substr($this->editBuffer, 0, -1),
+                'Backspace' => $this->editBackspace(),
+                'Delete'    => $this->editDelete(),
+                'Left'      => $this->editCursor = max(0, $this->editCursor - 1),
+                'Right'     => $this->editCursor = min(mb_strlen($this->editBuffer), $this->editCursor + 1),
+                'Home'      => $this->editCursor = 0,
+                'End'       => $this->editCursor = mb_strlen($this->editBuffer),
                 default     => null,
             };
             return;
@@ -308,14 +314,24 @@ class App
         };
     }
 
-    private function rowCharKey(string $char): void
+    private function rowCharKey(string $char, bool $ctrl = false): void
     {
         if ($this->isEditing) {
-            if ($char === "\x7f") {
-                $this->editBuffer = mb_substr($this->editBuffer, 0, -1);
+            if ($ctrl && $char === 'a') {
+                $this->editCursor = 0;
                 return;
             }
-            $this->editBuffer .= $char;
+
+            if ($ctrl && $char === 'e') {
+                $this->editCursor = mb_strlen($this->editBuffer);
+                return;
+            }
+
+            if ($char === "\x7f") {
+                $this->editBackspace();
+                return;
+            }
+            $this->editInsert($char);
             return;
         }
 
@@ -508,6 +524,7 @@ class App
             ? ($this->dirtyValues[$col] ?? '')
             : ($row[$col] === null ? '' : (string) $row[$col]);
         $this->editBuffer = $current;
+        $this->editCursor = mb_strlen($this->editBuffer);
         $this->isEditing  = true;
         $this->saveMessage = null;
     }
@@ -525,12 +542,48 @@ class App
         $this->dirtyValues[$col] = $value;
         $this->isEditing         = false;
         $this->editBuffer        = '';
+        $this->editCursor        = 0;
     }
 
     private function cancelEdit(): void
     {
         $this->isEditing  = false;
         $this->editBuffer = '';
+        $this->editCursor = 0;
+    }
+
+    private function editInsert(string $char): void
+    {
+        $before = mb_substr($this->editBuffer, 0, $this->editCursor);
+        $after  = mb_substr($this->editBuffer, $this->editCursor);
+
+        $this->editBuffer = $before . $char . $after;
+        $this->editCursor += mb_strlen($char);
+    }
+
+    private function editBackspace(): void
+    {
+        if ($this->editCursor <= 0) {
+            return;
+        }
+
+        $before = mb_substr($this->editBuffer, 0, $this->editCursor - 1);
+        $after  = mb_substr($this->editBuffer, $this->editCursor);
+
+        $this->editBuffer = $before . $after;
+        $this->editCursor--;
+    }
+
+    private function editDelete(): void
+    {
+        if ($this->editCursor >= mb_strlen($this->editBuffer)) {
+            return;
+        }
+
+        $before = mb_substr($this->editBuffer, 0, $this->editCursor);
+        $after  = mb_substr($this->editBuffer, $this->editCursor + 1);
+
+        $this->editBuffer = $before . $after;
     }
 
     private function saveRow(): void
