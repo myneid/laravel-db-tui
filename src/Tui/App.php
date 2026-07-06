@@ -39,6 +39,7 @@ class App
     public array   $sqlRows     = [];
     public ?string $sqlError    = null;
     public int     $sqlRowIndex = 0;  // selected row in the results table
+    public ?string $sqlResultTable = null; // single source table for the last SELECT, if editable
     /** @var string[] */
     public array   $sqlSuggestions = [];
     public int     $sqlSuggestionIndex = 0;
@@ -133,7 +134,7 @@ class App
             Mode::Data    => $this->dataCharKey($char),
             Mode::Row     => $this->rowCharKey($char, $ctrl),
             Mode::Sql     => $this->sqlCharKey($char),
-            Mode::SqlRow  => $this->sqlRowCharKey($char),
+            Mode::SqlRow  => $this->sqlRowCharKey($char, $ctrl),
         };
     }
 
@@ -174,7 +175,7 @@ class App
                     $clicked = $y - 7;
                     if ($clicked >= 0 && $clicked < count($this->sqlRows)) {
                         $this->sqlRowIndex = $clicked;
-                        $this->mode        = Mode::SqlRow;
+                        $this->enterSqlRowDetail();
                     }
                     break;
                 }
@@ -365,21 +366,58 @@ class App
 
     private function sqlRowCodedKey(string $code): void
     {
+        if ($this->isEditing) {
+            match ($code) {
+                'Enter'     => $this->confirmEdit(),
+                'Esc'       => $this->cancelEdit(),
+                'Backspace' => $this->editBackspace(),
+                'Delete'    => $this->editDelete(),
+                'Left'      => $this->editCursor = max(0, $this->editCursor - 1),
+                'Right'     => $this->editCursor = min(mb_strlen($this->editBuffer), $this->editCursor + 1),
+                'Home'      => $this->editCursor = 0,
+                'End'       => $this->editCursor = mb_strlen($this->editBuffer),
+                default     => null,
+            };
+            return;
+        }
+
         match ($code) {
             'Esc'   => $this->mode = Mode::Sql,
-            'Down'  => $this->sqlResultDown(),
-            'Up'    => $this->sqlResultUp(),
+            'Down'  => $this->editFieldIndex = min($this->editFieldIndex + 1, count($this->editTargetRow()) - 1),
+            'Up'    => $this->editFieldIndex = max(0, $this->editFieldIndex - 1),
+            'Enter' => $this->startEditing(),
             default => null,
         };
     }
 
-    private function sqlRowCharKey(string $char): void
+    private function sqlRowCharKey(string $char, bool $ctrl = false): void
     {
+        if ($this->isEditing) {
+            if ($ctrl && $char === 'a') {
+                $this->editCursor = 0;
+                return;
+            }
+
+            if ($ctrl && $char === 'e') {
+                $this->editCursor = mb_strlen($this->editBuffer);
+                return;
+            }
+
+            if ($char === "\x7f") {
+                $this->editBackspace();
+                return;
+            }
+            $this->editInsert($char);
+            return;
+        }
+
         match ($char) {
             'q'     => $this->running = false,
-            'j'     => $this->sqlResultDown(),
-            'y'     => $this->copySqlRowField(),
-            'k'     => $this->sqlResultUp(),
+            'j'     => $this->editFieldIndex = min($this->editFieldIndex + 1, count($this->editTargetRow()) - 1),
+            'k'     => $this->editFieldIndex = max(0, $this->editFieldIndex - 1),
+            'e'     => $this->startEditing(),
+            's'     => $this->saveRow(),
+            'y'     => $this->copySelectedField(),
             default => null,
         };
     }
@@ -511,9 +549,31 @@ class App
         $this->saveMessage    = null;
     }
 
+    private function enterSqlRowDetail(): void
+    {
+        $this->mode           = Mode::SqlRow;
+        $this->editFieldIndex = 0;
+        $this->isEditing      = false;
+        $this->editBuffer     = '';
+        $this->dirtyValues    = [];
+        $this->saveMessage    = null;
+    }
+
+    /** The row currently shown in whichever detail view (Row or SqlRow) is active. */
+    private function editTargetRow(): array
+    {
+        return $this->mode === Mode::SqlRow ? $this->currentSqlRow() : $this->currentRow();
+    }
+
+    /** The table edits should be written to, or null if it can't be determined safely. */
+    private function editTargetTable(): ?string
+    {
+        return $this->mode === Mode::SqlRow ? $this->sqlResultTable : $this->selectedTable();
+    }
+
     private function startEditing(): void
     {
-        $row  = $this->currentRow();
+        $row  = $this->editTargetRow();
         $keys = array_keys($row);
         $col  = $keys[$this->editFieldIndex] ?? null;
         if ($col === null) {
@@ -531,7 +591,7 @@ class App
 
     private function confirmEdit(): void
     {
-        $row  = $this->currentRow();
+        $row  = $this->editTargetRow();
         $keys = array_keys($row);
         $col  = $keys[$this->editFieldIndex] ?? null;
         if ($col === null) {
@@ -593,15 +653,28 @@ class App
             return;
         }
 
+        $table = $this->editTargetTable();
+        if ($table === null || $table === '') {
+            $this->saveMessage = 'Cannot save: this query is not editable (it spans multiple tables or none).';
+            return;
+        }
+
         try {
-            $table    = $this->selectedTable();
-            $original = $this->rows[$this->rowIndex];
+            $original = $this->editTargetRow();
             $affected = $this->db->updateRow($table, $original, $this->dirtyValues);
 
             $this->saveMessage = "Saved — {$affected} row updated.";
+
+            if ($this->mode === Mode::SqlRow) {
+                foreach ($this->dirtyValues as $col => $val) {
+                    $this->sqlRows[$this->sqlRowIndex][$col] = $val;
+                }
+            } else {
+                $this->invalidateRowsCache($table);
+                $this->fetchRows();
+            }
+
             $this->dirtyValues = [];
-            $this->invalidateRowsCache($table);
-            $this->fetchRows();
         } catch (\Throwable $e) {
             $this->saveMessage = 'Error: ' . $e->getMessage();
         }
@@ -617,6 +690,7 @@ class App
         $this->sqlColumns         = [];
         $this->sqlRows            = [];
         $this->sqlError           = null;
+        $this->sqlResultTable     = null;
         $this->sqlSuggestions     = [];
         $this->sqlSuggestionIndex = 0;
     }
@@ -647,6 +721,7 @@ class App
             $this->sqlRows     = $result['rows'];
             $this->sqlRowIndex = 0;
             $this->sqlError    = null;
+            $this->sqlResultTable = $this->detectSqlResultTable($sql);
 
             if (!$this->isReadOnlySql($sql)) {
                 $this->invalidateAllDataCache();
@@ -656,7 +731,40 @@ class App
             $this->sqlColumns  = [];
             $this->sqlRows     = [];
             $this->sqlRowIndex = 0;
+            $this->sqlResultTable = null;
         }
+    }
+
+    /**
+     * Determine the single table a SELECT result can be safely written back to.
+     * Returns null for non-SELECT statements, joins, or when the selected columns
+     * don't map cleanly onto that table's real columns (aliases, expressions, etc).
+     */
+    private function detectSqlResultTable(string $sql): ?string
+    {
+        if (preg_match('/^\s*select\b/i', $sql) !== 1) {
+            return null;
+        }
+
+        if (preg_match('/\bjoin\b/i', $sql) === 1) {
+            return null;
+        }
+
+        if (preg_match('/\bfrom\s+`?"?([A-Za-z_][A-Za-z0-9_]*)`?"?/i', $sql, $m) !== 1) {
+            return null;
+        }
+
+        $table = $m[1];
+        if (!in_array($table, $this->tables, true)) {
+            return null;
+        }
+
+        $tableColumns = $this->getColumnsCached($table);
+        if (!empty($this->sqlColumns) && array_diff($this->sqlColumns, $tableColumns) !== []) {
+            return null;
+        }
+
+        return $table;
     }
 
     private function sqlSuggestionDown(): void
@@ -1012,7 +1120,7 @@ class App
      */
     private function copySelectedField(): void
     {
-        $row = $this->currentRow();
+        $row = $this->editTargetRow();
         if (empty($row)) {
             $this->statusMessage = 'No row selected.';
             return;
@@ -1040,26 +1148,4 @@ class App
         }
     }
 
-    /**
-     * Copy the selected cell from SQL results.
-     */
-    private function copySqlRowField(): void
-    {
-        $row = $this->currentSqlRow();
-        if (empty($row)) {
-            $this->statusMessage = 'No row selected.';
-            return;
-        }
-
-        // Copy entire row as tab-separated for SQL results
-        $values = array_map(fn ($v) => $v === null ? 'NULL' : (string) $v, $row);
-        $text = implode("\t", $values);
-
-        if ($this->copyToClipboard($text)) {
-            $count = count($row);
-            $this->statusMessage = "Copied row ({$count} columns)";
-        } else {
-            $this->statusMessage = 'Failed to copy to clipboard.';
-        }
-    }
 }

@@ -188,16 +188,19 @@ Non-`SELECT` statements (INSERT, UPDATE, DELETE, CREATE, etc.) are supported —
 
 ### SQL result row detail
 
-Click any result row, or navigate with `↑↓` and press `Enter`, to open a full word-wrapped key/value view of that row.
+Click any result row to open the same full key/value edit view used for table rows (see [Row detail (edit mode)](#row-detail-edit-mode) below).
 
 | Key | Action |
 |---|---|
-| `↑` / `k` | Previous result row |
-| `↓` / `j` | Next result row |
+| `↑` / `k` | Previous field |
+| `↓` / `j` | Next field |
+| `e` / `Enter` | Edit the focused field |
+| `s` | Save staged changes |
+| `y` | Copy the focused field |
 | `Esc` | Back to SQL results |
 | `q` | Quit |
 
-> SQL result rows are read-only — editing is only available for rows opened from a named table.
+> Editing is only enabled when the query is a plain `SELECT` from a single table (no `JOIN`, and every selected column maps to a real column on that table). Anything else — joins, computed/aliased columns, non-`SELECT` statements — opens the same view read-only, marked `[READ-ONLY]` in the title.
 
 ### Mouse
 
@@ -263,12 +266,12 @@ DbTuiCommand          — entry point, terminal setup, event loop
 ```
 Tables ⇄ Data → Row (edit + save)
               ↘
-              Sql → SqlRow (read-only detail)
+              Sql → SqlRow (edit + save when the query is a single plain table; read-only otherwise)
 
 Sql popup is reachable from Tables/Data/Row with `s`, `:`, or `Ctrl+E`; Esc returns to the previous mode.
 ```
 
-**Editing** (`App`): Row detail tracks `editFieldIndex`, `isEditing`, `editBuffer`, and `dirtyValues`. Confirming an edit stages the change in `dirtyValues`; pressing `s` flushes all staged changes in a single `UPDATE` statement and refreshes the page.
+**Editing** (`App`): Row detail tracks `editFieldIndex`, `isEditing`, `editBuffer`, and `dirtyValues`. Confirming an edit stages the change in `dirtyValues`; pressing `s` flushes all staged changes in a single `UPDATE` statement and refreshes the page. `Row` and `SqlRow` share this same mechanism — `SqlRow` resolves its target table via `sqlResultTable`, detected from the executed SQL (`null` when the query isn't a single plain table, which disables saving).
 
 **Rendering** (`Renderer`): Stateless — called every frame (~60 fps), reads `App` and builds a `GridWidget` tree. php-tui diffs the widget tree against the previous frame before writing to the terminal.
 

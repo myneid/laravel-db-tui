@@ -187,14 +187,42 @@ class Renderer
             ? " Row {$rowNum} of {$app->totalRows}  [UNSAVED CHANGES] "
             : " Row {$rowNum} of {$app->totalRows} ";
 
-        $fieldKeys  = array_keys($row);
-        $tableRows  = [];
+        $statusText = $app->saveMessage
+            ?? ($app->isEditing ? 'Arrows/Home/End: move  Backspace/Delete: edit  Enter: confirm  Esc: cancel' : 'e/Enter: edit field  s: save  Esc: back');
 
-        foreach ($row as $i => $col) {
-            // $i is the column name here (from foreach with string keys)
+        return $this->buildRowDetailGrid($app, $row, $title, $statusText);
+    }
+
+    private function buildSqlRowDetail(App $app): mixed
+    {
+        $row    = $app->currentSqlRow();
+        $rowNum = $app->sqlRowIndex + 1;
+        $total  = count($app->sqlRows);
+
+        if (empty($row)) {
+            return $this->emptyBlock(' Row detail ', 'No row selected.');
         }
 
-        // Rebuild with proper index tracking
+        $editable    = $app->sqlResultTable !== null;
+        $hasDirty    = !empty($app->dirtyValues);
+        $titleSuffix = $editable ? '' : '  [READ-ONLY]';
+        $title       = $hasDirty
+            ? " SQL Result — Row {$rowNum} of {$total}  [UNSAVED CHANGES] "
+            : " SQL Result — Row {$rowNum} of {$total}{$titleSuffix} ";
+
+        $statusText = $app->saveMessage
+            ?? ($app->isEditing
+                ? 'Arrows/Home/End: move  Backspace/Delete: edit  Enter: confirm  Esc: cancel'
+                : ($editable
+                    ? 'e/Enter: edit field  s: save  Esc: back to results'
+                    : 'Read-only (query is not a single plain table)  Esc: back to results'));
+
+        return $this->buildRowDetailGrid($app, $row, $title, $statusText);
+    }
+
+    /** @param array<string, mixed> $row */
+    private function buildRowDetailGrid(App $app, array $row, string $title, string $statusText): mixed
+    {
         $tableRows = [];
         $i = 0;
         foreach ($row as $col => $val) {
@@ -237,10 +265,6 @@ class Renderer
             $tableRows[] = TableRow::fromCells($colCell, $valueCell)->height($height);
             $i++;
         }
-
-        // Status line (save feedback or editing hint)
-        $statusText = $app->saveMessage
-            ?? ($app->isEditing ? 'Arrows/Home/End: move  Backspace/Delete: edit  Enter: confirm  Esc: cancel' : 'e/Enter: edit field  s: save  Esc: back');
 
         return GridWidget::default()
             ->direction(Direction::Vertical)
@@ -411,60 +435,6 @@ class Renderer
             );
     }
 
-    private function buildSqlRowDetail(App $app): mixed
-    {
-        $row    = $app->currentSqlRow();
-        $rowNum = $app->sqlRowIndex + 1;
-        $total  = count($app->sqlRows);
-
-        if (empty($row)) {
-            return $this->emptyBlock(' Row detail ', 'No row selected.');
-        }
-
-        $tableRows = [];
-        foreach ($row as $col => $val) {
-            $str     = $val === null ? 'NULL' : (string) $val;
-            $wrapped = wordwrap($str, self::DETAIL_WRAP, "\n", true);
-            $lines   = explode("\n", $wrapped);
-            $height  = count($lines);
-
-            $valueText = Text::fromLines(
-                ...array_map(fn (string $l) => Line::fromString($l), $lines)
-            );
-
-            $tableRows[] = TableRow::fromCells(
-                $this->cell((string) $col, Style::default()->addModifier(Modifier::BOLD)->fg(AnsiColor::LightYellow)),
-                new TableCell($valueText, Style::default())
-            )->height($height);
-        }
-
-        $helpBar = ParagraphWidget::fromText(
-            Text::fromString(' Esc: back to SQL results | ↑↓/jk: prev/next row | q: quit')
-        );
-
-        return GridWidget::default()
-            ->direction(Direction::Vertical)
-            ->constraints(Constraint::min(3), Constraint::length(1))
-            ->widgets(
-                BlockWidget::default()
-                    ->titles(Title::fromString(" SQL Result — Row {$rowNum} of {$total} "))
-                    ->borders(Borders::ALL)
-                    ->borderType(BorderType::Double)
-                    ->widget(
-                        TableWidget::default()
-                            ->widths(Constraint::percentage(28), Constraint::percentage(72))
-                            ->header(
-                                TableRow::fromCells(
-                                    $this->cell('Column', Style::default()->addModifier(Modifier::BOLD)),
-                                    $this->cell('Value',  Style::default()->addModifier(Modifier::BOLD))
-                                )
-                            )
-                            ->rows(...$tableRows)
-                    ),
-                $helpBar
-            );
-    }
-
     // ── Help bar ──────────────────────────────────────────────────────────
 
     private function buildHelpBar(App $app): mixed
@@ -479,7 +449,7 @@ class Renderer
             Mode::Sql =>
                 ' Type SQL | Tab: complete | Enter: execute | click row: detail | ↑↓: suggest/results | Esc: close popup',
             Mode::SqlRow =>
-                ' Esc: back to SQL results | ↑↓/jk: prev/next row | y: copy | q: quit',
+                ' ↑↓/jk: field  e/Enter: edit  s: save  y: copy  Esc: back to results  q: quit  (type NULL to store null)',
         };
 
         return ParagraphWidget::fromText(Text::fromString($text));
