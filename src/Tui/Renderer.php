@@ -187,7 +187,9 @@ class Renderer
         $tableWidget = TableWidget::default()
             ->widths(...$constraints)
             ->header(TableRow::fromCells(...$headerCells))
-            ->rows(...$tableRows);
+            ->rows(...$tableRows)
+            ->highlightSymbol('')
+            ->select($app->rowIndex);
         $tableWidget->columnSpacing = 1;
 
         return BlockWidget::default()
@@ -308,6 +310,8 @@ class Renderer
                                 )
                             )
                             ->rows(...$tableRows)
+                            ->highlightSymbol('')
+                            ->select($app->editFieldIndex)
                     ),
                 ParagraphWidget::fromText(Text::fromString(' ' . $statusText))
             );
@@ -507,16 +511,20 @@ class Renderer
 
         $count = count($app->sqlRows);
 
+        $tableWidget = TableWidget::default()
+            ->widths(...$constraints)
+            ->header(TableRow::fromCells(...$headerCells))
+            ->rows(...$tableRows)
+            ->highlightSymbol('');
+        if ($count > 0) {
+            $tableWidget->select($app->sqlRowIndex);
+        }
+
         return BlockWidget::default()
             ->titles(Title::fromString(" Results ({$count} rows) "))
             ->borders(Borders::ALL)
             ->borderType(BorderType::Rounded)
-            ->widget(
-                TableWidget::default()
-                    ->widths(...$constraints)
-                    ->header(TableRow::fromCells(...$headerCells))
-                    ->rows(...$tableRows)
-            );
+            ->widget($tableWidget);
     }
 
     // ── Help bar ──────────────────────────────────────────────────────────
