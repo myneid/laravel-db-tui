@@ -90,7 +90,7 @@ class DbTuiCommand extends Command
                 }
             }
 
-            $display->draw($renderer->build($app));
+            $display->draw($renderer->build($app, $this->terminalWidth($terminal)));
 
             // ~60 fps — fast enough for a TUI, light enough for CPU
             usleep(16_000);
@@ -111,13 +111,7 @@ class DbTuiCommand extends Command
         }
 
         if ($event instanceof MouseEvent) {
-            // Terminal size API varies between php-tui minor versions
-            try {
-                $size  = $terminal->size();
-                $termW = $size->columns ?? $size->width ?? 80;
-            } catch (\Throwable) {
-                $termW = 80;
-            }
+            $termW = $this->terminalWidth($terminal);
 
             $kindName = $this->mouseKindName($event->kind);
             // MouseEvent uses ->column / ->row (php-tui ≥ 0.2); older builds use ->x / ->y
@@ -127,6 +121,17 @@ class DbTuiCommand extends Command
             if ($kindName !== null) {
                 $app->handleMouse($kindName, $col, $row, $termW);
             }
+        }
+    }
+
+    /** Terminal size API varies between php-tui minor versions. */
+    private function terminalWidth(Terminal $terminal): int
+    {
+        try {
+            $size = $terminal->size();
+            return $size->columns ?? $size->width ?? 80;
+        } catch (\Throwable) {
+            return 80;
         }
     }
 

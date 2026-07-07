@@ -31,6 +31,20 @@ class App
     public ?int  $sortColumn = null;
     public string $sortDir   = 'ASC';
 
+    // ── Column widths / visibility ─────────────────────────────────────────
+    private const MIN_COL_WIDTH        = 4;
+    private const MAX_COL_WIDTH        = 40;  // ceiling for auto-computed default widths
+    private const MAX_MANUAL_COL_WIDTH = 200; // ceiling for user-driven resize
+
+    /** @var array<string, int> "table.column" => user-set width override */
+    public array $columnWidths  = [];
+    /** @var array<string, true> "table.column" => hidden */
+    public array $hiddenColumns = [];
+    /** @var array<string, int> "table.column" => auto-computed default width (refreshed on fetch) */
+    private array $defaultColumnWidths = [];
+    public int   $columnOffset   = 0;  // first visible column shown in the Data table (horizontal scroll)
+    public int   $columnMgrIndex = 0;  // selected column row in the Columns popup
+
     // ── SQL editor ────────────────────────────────────────────────────────
     public string  $sqlInput    = '';
     /** @var string[] */
@@ -104,6 +118,45 @@ class App
         return $this->dataPage * $this->limit;
     }
 
+    // ── Column widths / visibility ──────────────────────────────────────────
+
+    private function colKey(string $col): string
+    {
+        return $this->selectedTable() . '.' . $col;
+    }
+
+    public function isColumnHidden(string $col): bool
+    {
+        return !empty($this->hiddenColumns[$this->colKey($col)]);
+    }
+
+    /** @return string[] columns of the selected table that aren't hidden, in original order */
+    public function visibleColumns(): array
+    {
+        return array_values(array_filter($this->columns, fn (string $c) => !$this->isColumnHidden($c)));
+    }
+
+    public function columnWidth(string $col): int
+    {
+        $key = $this->colKey($col);
+        return $this->columnWidths[$key] ?? $this->defaultColumnWidths[$key] ?? self::MIN_COL_WIDTH;
+    }
+
+    private function computeDefaultColumnWidths(): void
+    {
+        foreach ($this->columns as $col) {
+            $max = mb_strlen($col);
+            foreach ($this->rows as $row) {
+                $val = $row[$col] ?? null;
+                $len = $val === null ? 4 : mb_strlen((string) $val);
+                if ($len > $max) {
+                    $max = $len;
+                }
+            }
+            $this->defaultColumnWidths[$this->colKey($col)] = max(self::MIN_COL_WIDTH, min(self::MAX_COL_WIDTH, $max + 2));
+        }
+    }
+
     // ── Event handling ────────────────────────────────────────────────────
 
     public function handleCodedKey(string $code): void
@@ -114,6 +167,7 @@ class App
             Mode::Row     => $this->rowCodedKey($code),
             Mode::Sql     => $this->sqlCodedKey($code),
             Mode::SqlRow  => $this->sqlRowCodedKey($code),
+            Mode::Columns => $this->columnsCodedKey($code),
         };
     }
 
@@ -135,6 +189,7 @@ class App
             Mode::Row     => $this->rowCharKey($char, $ctrl),
             Mode::Sql     => $this->sqlCharKey($char),
             Mode::SqlRow  => $this->sqlRowCharKey($char, $ctrl),
+            Mode::Columns => $this->columnsCharKey($char),
         };
     }
 
@@ -309,7 +364,10 @@ class App
             $char === 'p' => $this->prevPage(),
             $char === 'y' => $this->copyCurrentCell(),
             $char === 'Y' => $this->copyCurrentRow(),
-            // 1–9: sort by that column (1-indexed)
+            $char === 'c' => $this->enterColumnsMode(),
+            $char === '[' => $this->scrollColumns(-1),
+            $char === ']' => $this->scrollColumns(1),
+            // 1–9: sort by that visible column (1-indexed)
             ctype_digit($char) && $char !== '0' => $this->toggleSort((int) $char - 1),
             default => null,
         };
@@ -519,9 +577,15 @@ class App
         $this->rowIndex = count($this->rows) - 1;
     }
 
-    private function toggleSort(int $col): void
+    private function toggleSort(int $visiblePos): void
     {
-        if ($col < 0 || $col >= count($this->columns)) {
+        $visible = $this->visibleColumns();
+        if ($visiblePos < 0 || $visiblePos >= count($visible)) {
+            return;
+        }
+
+        $col = array_search($visible[$visiblePos], $this->columns, true);
+        if ($col === false) {
             return;
         }
 
@@ -535,6 +599,97 @@ class App
         $this->dataPage = 0;
         $this->rowIndex = 0;
         $this->fetchRows();
+    }
+
+    // ── Column widths / visibility ───────────────────────────────────────────
+
+    private function scrollColumns(int $delta): void
+    {
+        $max = max(0, count($this->visibleColumns()) - 1);
+        $this->columnOffset = max(0, min($max, $this->columnOffset + $delta));
+    }
+
+    private function enterColumnsMode(): void
+    {
+        if ($this->selectedTable() === '' || empty($this->columns)) {
+            return;
+        }
+        $this->mode           = Mode::Columns;
+        $this->columnMgrIndex = 0;
+    }
+
+    private function columnsCodedKey(string $code): void
+    {
+        match ($code) {
+            'Esc'   => $this->mode = Mode::Data,
+            'Down'  => $this->columnMgrIndex = min($this->columnMgrIndex + 1, count($this->columns) - 1),
+            'Up'    => $this->columnMgrIndex = max(0, $this->columnMgrIndex - 1),
+            'Left'  => $this->resizeSelectedColumn(-2),
+            'Right' => $this->resizeSelectedColumn(2),
+            'Enter' => $this->toggleSelectedColumnHidden(),
+            default => null,
+        };
+    }
+
+    private function columnsCharKey(string $char): void
+    {
+        match ($char) {
+            'q'       => $this->running = false,
+            'j'       => $this->columnMgrIndex = min($this->columnMgrIndex + 1, count($this->columns) - 1),
+            'k'       => $this->columnMgrIndex = max(0, $this->columnMgrIndex - 1),
+            ' '       => $this->toggleSelectedColumnHidden(),
+            '-'       => $this->resizeSelectedColumn(-2),
+            '+', '='  => $this->resizeSelectedColumn(2),
+            'r'       => $this->resetSelectedColumnWidth(),
+            default   => null,
+        };
+    }
+
+    private function selectedColumnName(): ?string
+    {
+        return $this->columns[$this->columnMgrIndex] ?? null;
+    }
+
+    private function toggleSelectedColumnHidden(): void
+    {
+        $col = $this->selectedColumnName();
+        if ($col === null) {
+            return;
+        }
+
+        $key = $this->colKey($col);
+        if (!empty($this->hiddenColumns[$key])) {
+            unset($this->hiddenColumns[$key]);
+            return;
+        }
+
+        if (count($this->visibleColumns()) <= 1) {
+            $this->statusMessage = 'At least one column must stay visible.';
+            return;
+        }
+
+        $this->hiddenColumns[$key] = true;
+    }
+
+    private function resizeSelectedColumn(int $delta): void
+    {
+        $col = $this->selectedColumnName();
+        if ($col === null) {
+            return;
+        }
+
+        $current = $this->columnWidth($col);
+        $new     = max(self::MIN_COL_WIDTH, min(self::MAX_MANUAL_COL_WIDTH, $current + $delta));
+        $this->columnWidths[$this->colKey($col)] = $new;
+    }
+
+    private function resetSelectedColumnWidth(): void
+    {
+        $col = $this->selectedColumnName();
+        if ($col === null) {
+            return;
+        }
+        unset($this->columnWidths[$this->colKey($col)]);
     }
 
     // ── Row editing ───────────────────────────────────────────────────────
@@ -960,12 +1115,13 @@ class App
                 $this->tableMetaCache[$table] = $meta;
             }
 
-            $this->columns    = $meta['columns'];
-            $this->totalRows  = $meta['totalRows'];
-            $this->dataPage   = 0;
-            $this->rowIndex   = 0;
-            $this->sortColumn = null;
-            $this->sortDir    = 'ASC';
+            $this->columns      = $meta['columns'];
+            $this->totalRows    = $meta['totalRows'];
+            $this->dataPage     = 0;
+            $this->rowIndex     = 0;
+            $this->sortColumn   = null;
+            $this->sortDir      = 'ASC';
+            $this->columnOffset = 0;
             $this->fetchRows();
             $this->statusMessage = null;
             $this->loadedTable = $table;
@@ -993,6 +1149,7 @@ class App
                 $this->rows = $rows;
             }
             $this->statusMessage = null;
+            $this->computeDefaultColumnWidths();
         } catch (\Throwable $e) {
             $this->statusMessage = 'Error: ' . $e->getMessage();
             $this->rows          = [];

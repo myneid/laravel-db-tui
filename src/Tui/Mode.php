@@ -9,4 +9,5 @@ enum Mode
     case Row;      // Full row detail view (from Data)
     case Sql;      // Raw SQL editor + results
     case SqlRow;   // Full row detail view (from SQL results)
+    case Columns;  // Column show/hide + width popup (from Data)
 }

@@ -29,20 +29,21 @@ class Renderer
     private const DETAIL_WRAP  = 60;  // value column wrap width in row detail view
     private const SQL_MODAL_HEIGHT = 22;
 
-    public function build(App $app): mixed
+    public function build(App $app, int $termWidth = 80): mixed
     {
         return match ($app->mode) {
             Mode::Tables,
             Mode::Data,
-            Mode::Row   => $this->buildBrowse($app),
-            Mode::Sql   => $this->buildSql($app),
-            Mode::SqlRow => $this->buildSqlRowDetail($app),
+            Mode::Row     => $this->buildBrowse($app, $termWidth),
+            Mode::Sql     => $this->buildSql($app),
+            Mode::SqlRow  => $this->buildSqlRowDetail($app),
+            Mode::Columns => $this->buildColumnsPopup($app),
         };
     }
 
     // ── Browse layout (Tables + Data/Row-detail) ──────────────────────────
 
-    private function buildBrowse(App $app): mixed
+    private function buildBrowse(App $app, int $termWidth): mixed
     {
         return GridWidget::default()
             ->direction(Direction::Vertical)
@@ -61,7 +62,7 @@ class Renderer
                         $this->buildTableList($app),
                         $app->mode === Mode::Row
                             ? $this->buildRowDetail($app)
-                            : $this->buildDataTable($app)
+                            : $this->buildDataTable($app, $termWidth)
                     ),
                 $this->buildHelpBar($app)
             );
@@ -93,7 +94,7 @@ class Renderer
             ->widget($inner);
     }
 
-    private function buildDataTable(App $app): mixed
+    private function buildDataTable(App $app, int $termWidth): mixed
     {
         $focused = $app->mode === Mode::Data;
         $table   = $app->selectedTable();
@@ -116,18 +117,40 @@ class Renderer
                 );
         }
 
-        $colCount = count($app->columns);
-
-        if ($colCount === 0 || empty($app->rows)) {
-            $msg = $colCount === 0 ? 'Could not read columns.' : 'No rows in this table.';
+        if (empty($app->columns) || empty($app->rows)) {
+            $msg = empty($app->columns) ? 'Could not read columns.' : 'No rows in this table.';
             return $this->emptyBlock(" {$table} ", $msg);
         }
 
+        $visible = $app->visibleColumns();
+        if (empty($visible)) {
+            return $this->emptyBlock(" {$table} ", 'All columns are hidden. Press "c" to manage columns.');
+        }
+
+        // Fit as many fixed-width columns as possible, starting at columnOffset (horizontal scroll).
+        $offset    = min($app->columnOffset, count($visible) - 1);
+        $available = max(10, $termWidth - self::LEFT_WIDTH - 2);
+        $shown     = [];
+        $used      = 0;
+        for ($i = $offset; $i < count($visible); $i++) {
+            $col  = $visible[$i];
+            $w    = $app->columnWidth($col);
+            $sep  = empty($shown) ? 0 : 1;
+            if ($used + $sep + $w > $available && !empty($shown)) {
+                break;
+            }
+            $shown[] = $col;
+            $used   += $sep + $w;
+        }
+
+        $hiddenBefore = $offset;
+        $hiddenAfter  = count($visible) - $offset - count($shown);
+
         // Header row
         $headerCells = [];
-        foreach ($app->columns as $i => $col) {
+        foreach ($shown as $col) {
             $label = $col;
-            if ($app->sortColumn === $i) {
+            if ($app->sortColumn !== null && ($app->columns[$app->sortColumn] ?? null) === $col) {
                 $label .= $app->sortDir === 'ASC' ? ' ↑' : ' ↓';
             }
             $headerCells[] = $this->cell(
@@ -141,7 +164,8 @@ class Renderer
         foreach ($app->rows as $i => $row) {
             $isSelected = $focused && ($i === $app->rowIndex);
             $cells = [];
-            foreach (array_values($row) as $val) {
+            foreach ($shown as $col) {
+                $val     = $row[$col] ?? null;
                 $str     = $val === null ? 'NULL' : (string) $val;
                 $str     = $this->truncate($str, self::TRUNCATE);
                 $cells[] = $isSelected
@@ -151,26 +175,26 @@ class Renderer
             $tableRows[] = TableRow::fromCells(...$cells);
         }
 
-        // Distribute columns evenly
-        $pct         = (int) max(1, floor(100 / $colCount));
-        $constraints = array_fill(0, $colCount, Constraint::percentage($pct));
+        $constraints = array_map(fn (string $col) => Constraint::length($app->columnWidth($col)), $shown);
 
         $start = $app->pageOffset() + 1;
         $end   = min($app->pageOffset() + count($app->rows), $app->totalRows);
+        $colNote = ($hiddenBefore > 0 ? '←' . $hiddenBefore . ' ' : '') . ($hiddenAfter > 0 ? '→' . $hiddenAfter . ' ' : '');
         $title = $focused
-            ? " [{$table}] (rows {$start}–{$end} of {$app->totalRows}) "
-            : " {$table} (rows {$start}–{$end} of {$app->totalRows}) ";
+            ? " [{$table}] (rows {$start}–{$end} of {$app->totalRows}) {$colNote}"
+            : " {$table} (rows {$start}–{$end} of {$app->totalRows}) {$colNote}";
+
+        $tableWidget = TableWidget::default()
+            ->widths(...$constraints)
+            ->header(TableRow::fromCells(...$headerCells))
+            ->rows(...$tableRows);
+        $tableWidget->columnSpacing = 1;
 
         return BlockWidget::default()
             ->titles(Title::fromString($title))
             ->borders(Borders::ALL)
             ->borderType($focused ? BorderType::Double : BorderType::Rounded)
-            ->widget(
-                TableWidget::default()
-                    ->widths(...$constraints)
-                    ->header(TableRow::fromCells(...$headerCells))
-                    ->rows(...$tableRows)
-            );
+            ->widget($tableWidget);
     }
 
     private function buildRowDetail(App $app): mixed
@@ -350,6 +374,66 @@ class Renderer
             );
     }
 
+    // ── Columns popup ────────────────────────────────────────────────────
+
+    private function buildColumnsPopup(App $app): mixed
+    {
+        $lines = [];
+        foreach ($app->columns as $i => $col) {
+            $hidden   = $app->isColumnHidden($col);
+            $checkbox = $hidden ? '[ ]' : '[x]';
+            $prefix   = $i === $app->columnMgrIndex ? '▶ ' : '  ';
+            $suffix   = $hidden ? ' (hidden)' : '  width=' . $app->columnWidth($col);
+            $lines[]  = "{$prefix}{$checkbox} {$col}{$suffix}";
+        }
+
+        $body = empty($lines)
+            ? ParagraphWidget::fromText(Text::fromString('No columns.'))
+            : ParagraphWidget::fromText(Text::fromString(implode("\n", $lines)));
+
+        $modal = GridWidget::default()
+            ->direction(Direction::Vertical)
+            ->constraints(Constraint::min(3), Constraint::length(1))
+            ->widgets(
+                BlockWidget::default()
+                    ->titles(Title::fromString(' Columns — ' . $app->selectedTable() . ' '))
+                    ->borders(Borders::ALL)
+                    ->borderType(BorderType::Rounded)
+                    ->widget($body),
+                ParagraphWidget::fromText(Text::fromString(
+                    ' ↑↓/jk: select  Space/Enter: show/hide  ←→/-+: resize  r: reset width  Esc: close '
+                ))
+            );
+
+        return GridWidget::default()
+            ->direction(Direction::Vertical)
+            ->constraints(
+                Constraint::min(1),
+                Constraint::length(self::SQL_MODAL_HEIGHT),
+                Constraint::min(1)
+            )
+            ->widgets(
+                ParagraphWidget::fromText(Text::fromString('')),
+                GridWidget::default()
+                    ->direction(Direction::Horizontal)
+                    ->constraints(
+                        Constraint::percentage(20),
+                        Constraint::percentage(60),
+                        Constraint::percentage(20)
+                    )
+                    ->widgets(
+                        ParagraphWidget::fromText(Text::fromString('')),
+                        BlockWidget::default()
+                            ->titles(Title::fromString(' Manage Columns '))
+                            ->borders(Borders::ALL)
+                            ->borderType(BorderType::Double)
+                            ->widget($modal),
+                        ParagraphWidget::fromText(Text::fromString(''))
+                    ),
+                ParagraphWidget::fromText(Text::fromString(''))
+            );
+    }
+
     private function buildSqlSuggestions(App $app): mixed
     {
         if (empty($app->sqlSuggestions)) {
@@ -443,13 +527,15 @@ class Renderer
             Mode::Tables =>
                 ' ↑↓/jk: table | Enter/Tab/→: load table | :/s/Ctrl+E: SQL popup | q: quit',
             Mode::Data =>
-                ' ↑↓/jk: row | Tab/←: tables | Enter: detail | y: copy row | Y: copy as JSON | 1-9: sort | PgUp/n PgDn/p: page | :/s/Ctrl+E: SQL popup | q: quit',
+                ' ↑↓/jk: row | Tab/←: tables | Enter: detail | [/]: scroll cols | c: columns | y: copy row | Y: copy as JSON | 1-9: sort | PgUp/n PgDn/p: page | :/s/Ctrl+E: SQL popup | q: quit',
             Mode::Row =>
                 ' ↑↓/jk: field  e/Enter: edit  s: save  :/Ctrl+E: SQL popup  y: copy  Esc: back  q: quit  (type NULL to store null)',
             Mode::Sql =>
                 ' Type SQL | Tab: complete | Enter: execute | click row: detail | ↑↓: suggest/results | Esc: close popup',
             Mode::SqlRow =>
                 ' ↑↓/jk: field  e/Enter: edit  s: save  y: copy  Esc: back to results  q: quit  (type NULL to store null)',
+            Mode::Columns =>
+                ' ↑↓/jk: select  Space/Enter: show/hide  ←→/-+: resize  r: reset width  Esc: close  q: quit',
         };
 
         return ParagraphWidget::fromText(Text::fromString($text));

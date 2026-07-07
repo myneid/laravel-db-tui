@@ -13,12 +13,13 @@ An interactive terminal UI for browsing and editing your Laravel application's d
 │   sessions            │  3   │ Carol Perez   │ carol@example.com   │ 2024-01-03│
 │   jobs                │  4   │ Dave Müller   │ dave@example.com    │ 2024-01-04│
 └───────────────────────┴───────────────────────────────────────────────────────┘
- ↑↓/jk: row | Tab/←: tables | Enter: detail | 1-9: sort | PgUp/n PgDn/p: page | s: SQL | q: quit
+ ↑↓/jk: row | Tab/←: tables | Enter: detail | [/]: scroll cols | c: columns | 1-9: sort | PgUp/n PgDn/p: page | s: SQL | q: quit
 ```
 
 ## Features
 
 - **Browse any table** — scrollable table list on the left, paginated row view on the right
+- **Fixed-width, resizable columns** — each column gets a sensible default width based on its content; widen, narrow, or hide columns from a dedicated popup instead of everything getting squeezed evenly
 - **Sort columns** — press `1`–`9` to sort by that column, again to toggle ASC/DESC
 - **Inspect rows** — press `Enter` on a row to see every field in a word-wrapped key/value layout
 - **Edit and save rows** — edit any field in the detail view and write it back to the database
@@ -120,19 +121,39 @@ php artisan db:tui --forget=production
 
 ### Data panel (right)
 
+Columns are fixed-width (sized from their header/content, capped at 40 chars by default) instead of being split evenly, so a short `id` column doesn't get the same width as a long `email` column. When the visible columns are wider than the panel, the title shows `←N`/`→N` for how many columns are scrolled off each side.
+
 | Key | Action |
 |---|---|
 | `↑` / `k` | Previous row |
 | `↓` / `j` | Next row |
 | `Enter` | Open row detail view |
 | `Tab`, `←`, `Shift+Tab` | Switch focus to the table list |
-| `1`–`9` | Sort by column N (press again to toggle ASC ↔ DESC) |
+| `[` / `]` | Scroll columns left/right |
+| `c` | Open the Columns popup (show/hide, resize) |
+| `1`–`9` | Sort by the Nth *visible* column (press again to toggle ASC ↔ DESC) |
 | `PgUp` / `p` | Previous page |
 | `PgDn` / `n` | Next page |
 | `Home` | First page, first row |
 | `End` | Last page, last row |
 | `s`, `:`, `Ctrl+E` | Open SQL popup |
 | `q` / `Ctrl+C` | Quit |
+
+### Columns popup
+
+Opened with `c` from the data panel. Lists every column on the current table with a checkbox and its current width.
+
+| Key | Action |
+|---|---|
+| `↑` / `k` | Previous column |
+| `↓` / `j` | Next column |
+| `Space` / `Enter` | Show/hide the selected column (at least one must stay visible) |
+| `←` / `-` | Narrow the selected column |
+| `→` / `+` | Widen the selected column |
+| `r` | Reset the selected column back to its auto-computed width |
+| `Esc` | Close and return to the data panel |
+
+Hidden columns and custom widths are remembered per table for the rest of the session.
 
 ### Row detail view
 
@@ -256,7 +277,7 @@ DbTuiCommand          — entry point, terminal setup, event loop
     │       executeRaw
     │
     ├── App           — all state + input event handling
-    │       Mode enum: Tables | Data | Row | Sql | SqlRow
+    │       Mode enum: Tables | Data | Row | Sql | SqlRow | Columns
     │
     └── Renderer      — converts App state → php-tui widget tree (read-only)
 ```
@@ -268,12 +289,16 @@ Tables ⇄ Data → Row (edit + save)
               ↘
               Sql → SqlRow (edit + save when the query is a single plain table; read-only otherwise)
 
+Data → Columns (show/hide + resize popup) → back to Data
+
 Sql popup is reachable from Tables/Data/Row with `s`, `:`, or `Ctrl+E`; Esc returns to the previous mode.
 ```
 
 **Editing** (`App`): Row detail tracks `editFieldIndex`, `isEditing`, `editBuffer`, and `dirtyValues`. Confirming an edit stages the change in `dirtyValues`; pressing `s` flushes all staged changes in a single `UPDATE` statement and refreshes the page. `Row` and `SqlRow` share this same mechanism — `SqlRow` resolves its target table via `sqlResultTable`, detected from the executed SQL (`null` when the query isn't a single plain table, which disables saving).
 
-**Rendering** (`Renderer`): Stateless — called every frame (~60 fps), reads `App` and builds a `GridWidget` tree. php-tui diffs the widget tree against the previous frame before writing to the terminal.
+**Column layout** (`App`): `columnWidths` and `hiddenColumns` are override maps keyed by `"table.column"`, so preferences are scoped per table. Auto-computed default widths are cached in `defaultColumnWidths` whenever a page of rows is fetched (based on header/content length, capped at 40 chars); `columnWidth()` returns the user override if one exists, otherwise the cached default. The Data table only sends `Renderer` as many fixed-width columns as fit the panel, starting at `columnOffset`, so a wide table scrolls horizontally instead of every column being squeezed into an even percentage.
+
+**Rendering** (`Renderer`): Stateless — called every frame (~60 fps), reads `App` and builds a `GridWidget` tree. It also receives the current terminal width (fetched each frame in `DbTuiCommand`) so the Data table can decide how many fixed-width columns fit. php-tui diffs the widget tree against the previous frame before writing to the terminal.
 
 **Database** (`PdoConnection`): Raw PDO only — no Eloquent, no query builder. Identifiers are quoted per-driver to prevent injection from schema-derived names. Raw SQL mode executes user input directly (intentional for a developer tool). `updateRow()` uses the primary key as the `WHERE` predicate when available.
 
